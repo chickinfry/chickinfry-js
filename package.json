@@ -1,0 +1,31 @@
+{
+  "name": "@chickinfry/chickinfry-js",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared TypeScript runtime for Chickinfry generated clients and servers.",
+  "files": [
+    "src",
+    "dist"
+  ],
+  "exports": {
+    ".": "./dist/index.js",
+    "./auth": "./dist/auth/index.js",
+    "./postgres": "./dist/postgres.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "prepare": "tsc",
+    "test": "esbuild --bundle --platform=node --format=esm --outfile=test/verify-refresh.mjs test/verify-refresh.ts && node test/verify-refresh.mjs && esbuild --bundle --platform=node --format=esm --outfile=test/verify-redirect.mjs test/verify-redirect.ts && node test/verify-redirect.mjs && esbuild --bundle --platform=node --format=esm --outfile=test/verify-opaque-redirect.mjs test/verify-opaque-redirect.ts && node test/verify-opaque-redirect.mjs"
+  },
+  "dependencies": {
+    "pg": "8.23.0",
+    "pg-cloudflare": "1.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.3",
+    "@types/pg": "8.23.1",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2"
+  }
+}
