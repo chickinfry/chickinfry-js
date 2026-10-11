@@ -1,4 +1,6 @@
-import { and, createDatabase, type Database, type DatabasePort, type AppAuthUsersRow } from "./private/database.js";
+import { Buffer } from "node:buffer";
+import { and, or, createDatabase, type Database, type DatabasePort, type AppAuthUsersRow, type AppAuthInvitesRow } from "./private/database.js";
+import { encodeTimestampValue } from "../orm.js";
 import { hashPassword, verifyPassword, randomToken, hashToken } from "./crypto.js";
 
 export class AuthError extends Error {
@@ -31,7 +33,28 @@ export interface AuthUser {
 export interface UserCreationHooks {
   creating?(transaction: DatabasePort, user: AuthUser): Promise<void>;
   committed?(user: AuthUser): Promise<void>;
+  inviteManaging?(transaction: DatabasePort, actor: AuthActor, projectId: string): Promise<void>;
 }
+
+export interface AuthActor {
+  readonly id: string;
+  readonly user: { readonly id: string; readonly email: string };
+}
+
+export interface AuthOptions {
+  readonly signup?: "open" | "invite-only";
+  readonly projectId?: string;
+}
+
+export interface InviteSummary {
+  readonly id: string;
+  readonly email: string;
+  readonly status: "issued" | "redeemed" | "revoked" | "expired";
+  readonly createdAt: string;
+  readonly expiresAt: string;
+}
+
+const day = 24 * 60 * 60_000;
 
 export class Auth {
   private readonly providers = new Map<string, IdentityProvider>();
@@ -42,7 +65,11 @@ export class Auth {
     providers: readonly IdentityProvider[] = [],
     private readonly now = Date.now,
     private readonly hooks: UserCreationHooks = {},
+    private readonly options: AuthOptions = {},
   ) {
+    if (options.signup !== undefined && options.signup !== "open" && options.signup !== "invite-only") {
+      throw new Error("Invalid signup policy.");
+    }
     this.db = createDatabase(port);
     for (const provider of providers) {
       if (!/^[a-z][a-z0-9_-]{0,62}$/.test(provider.id) || provider.id === "password" || this.providers.has(provider.id)) {
@@ -52,17 +79,21 @@ export class Auth {
     }
   }
 
-  async signup(email: string, password: string): Promise<Tokens> {
+  async signup(email: string, password: string, inviteCode = ""): Promise<Tokens> {
     email = normalizeEmail(email);
     validatePassword(password);
+    if (typeof inviteCode !== "string") throw new AuthError("invalid_input", 400);
     await this.rateLimit("signup", email);
+    if (this.options.signup === "invite-only") await this.checkInvite(this.db, email, inviteCode);
     const passwordHash = await hashPassword(password);
     let created: AuthUser | undefined;
     let tokens: Tokens;
     try {
       tokens = await this.port.transaction(async port => {
         const tx = createDatabase(port);
+        const invite = await this.lockInvite(tx, email, inviteCode);
         const user = await tx.appAuthUsers.insert({ email, passwordHash });
+        if (invite) await tx.appAuthInvites.update({id: invite.id}, {redeemedAt: this.timestamp(), redeemedBy: user.id});
         created = publicUser(user);
         await this.creating(port, created);
         return this.issue(tx, user);
@@ -88,7 +119,8 @@ export class Auth {
     return tokens;
   }
 
-  async signinIdentity(providerID: string, credential: unknown): Promise<Tokens> {
+  async signinIdentity(providerID: string, credential: unknown, inviteCode = ""): Promise<Tokens> {
+    if (typeof inviteCode !== "string") throw new AuthError("invalid_input", 400);
     const provider = this.providers.get(providerID);
     if (!provider) throw new AuthError("unsupported_identity_provider", 400);
     await this.rateLimit("identity_attempt", providerID, 100, 60_000);
@@ -100,17 +132,24 @@ export class Auth {
       throw new AuthError("invalid_credentials", 401);
     }
     await this.rateLimit("identity", providerID + ":" + identity.subject);
+    if (this.options.signup === "invite-only" &&
+        !await this.db.appAuthIdentities.findById({provider: providerID, subject: identity.subject})) {
+      await this.rateLimit("signup", email);
+      await this.checkInvite(this.db, email, inviteCode);
+    }
     let created: AuthUser | undefined;
     let tokens: Tokens;
     try {
       tokens = await this.port.transaction(async port => {
         const tx = createDatabase(port);
         const stored = await tx.appAuthIdentities.findById({provider: providerID, subject: identity.subject});
+        const invite = stored ? undefined : await this.lockInvite(tx, email, inviteCode);
         const user = stored
           ? await tx.appAuthUsers.findById({id: stored.userId})
           : await tx.appAuthUsers.insert({email, passwordHash: null});
         if (!user || user.disabledAt !== null) throw new AuthError("invalid_credentials", 401);
         if (!stored) {
+          if (invite) await tx.appAuthInvites.update({id: invite.id}, {redeemedAt: this.timestamp(), redeemedBy: user.id});
           await tx.appAuthIdentities.insert({provider: providerID, subject: identity.subject, userId: user.id});
           created = publicUser(user);
           await this.creating(port, created);
@@ -124,6 +163,111 @@ export class Auth {
     if (created) await this.created(created);
     await this.cleanup();
     return tokens;
+  }
+
+  async inviteIssue(accessToken: string, id: string, email: string): Promise<InviteSummary & {code: string}> {
+    id = inviteID(id);
+    email = normalizeEmail(email);
+    let result: InviteSummary & {code: string};
+    try {
+      result = await this.manageInvites(accessToken, async tx => {
+        if (await tx.db.appAuthInvites.findById({id})) throw new AuthError("invite_issue_replayed", 409);
+        const code = randomToken();
+        const createdAt = this.timestamp();
+        const row = await tx.db.appAuthInvites.insert({id, email, codeHash: hashToken(code), issuedBy: tx.actor.user.id,
+          createdAt, expiresAt: new Date(Date.parse(createdAt) + 7 * day).toISOString()});
+        return {...inviteSummary(row, this.now()), code};
+      });
+    } catch (error) {
+      if (uniqueViolation(error) && await this.db.appAuthInvites.findById({id})) {
+        throw new AuthError("invite_issue_replayed", 409);
+      }
+      throw error;
+    }
+    await this.cleanupInvites();
+    return result;
+  }
+
+  async inviteList(accessToken: string, cursor: string): Promise<{items: InviteSummary[]; nextCursor: string}> {
+    const after = inviteCursor(cursor);
+    const result = await this.manageInvites(accessToken, async tx => {
+      const rows = await tx.db.appAuthInvites.findMany({
+        where: after ? c => or(c.createdAt.greaterThan(after[0]),
+          and(c.createdAt.equals(after[0]), c.id.greaterThan(after[1]))) : undefined,
+        orderBy: c => [c.createdAt.asc(), c.id.asc()], limit: 51,
+      });
+      const page = rows.slice(0, 50);
+      const last = page.at(-1);
+      return {items: page.map(row => inviteSummary(row, this.now())), nextCursor: rows.length > 50 && last
+        ? Buffer.from(JSON.stringify([last.createdAt, last.id])).toString("base64url") : ""};
+    });
+    await this.cleanupInvites();
+    return result;
+  }
+
+  async inviteRevoke(accessToken: string, id: string): Promise<{id: string; status: InviteSummary["status"]}> {
+    id = inviteID(id);
+    const result = await this.manageInvites(accessToken, async tx => {
+      const candidate = await tx.db.appAuthInvites.findById({id});
+      if (!candidate) throw new AuthError("not_found", 404);
+      const row = await tx.db.appAuthInvites.updateIf({id}, c => c.expiresAt.equals(candidate.expiresAt),
+        {expiresAt: candidate.expiresAt});
+      if (!row) throw new AuthError("not_found", 404);
+      const summary = inviteSummary(row, this.now());
+      if (summary.status === "redeemed") throw new AuthError("invite_already_redeemed", 409);
+      if (summary.status === "issued") await tx.db.appAuthInvites.update({id}, {revokedAt: this.timestamp()});
+      return {id, status: summary.status === "issued" ? "revoked" as const : summary.status};
+    });
+    await this.cleanupInvites();
+    return result;
+  }
+
+  private async manageInvites<T>(accessToken: string,
+    work: (context: {db: Database; actor: AuthActor}) => Promise<T>): Promise<T> {
+    if (this.options.signup !== "invite-only") throw new AuthError("not_found", 404);
+    validateToken(accessToken);
+    return this.port.transaction(async port => {
+      const db = createDatabase(port);
+      const candidate = (await db.appAuthSessions.findMany({where: c => c.tokenHash.equals(hashToken(accessToken)), limit: 1}))[0];
+      if (!candidate) throw new AuthError("invalid_token", 401);
+      const session = await db.appAuthSessions.updateIf({id: candidate.id}, c => and(c.tokenHash.equals(hashToken(accessToken)),
+        c.revokedAt.isNull(), c.expiresAt.greaterThan(this.timestamp())), {expiresAt: candidate.expiresAt});
+      if (!session || Date.parse(session.expiresAt) <= this.now()) throw new AuthError("invalid_token", 401);
+      const user = await db.appAuthUsers.updateIf({id: session.userId}, c => and(c.disabledAt.isNull(),
+        c.sessionVersion.equals(session.userSessionVersion)), {sessionVersion: session.userSessionVersion});
+      if (!user) throw new AuthError("invalid_token", 401);
+      if (!this.hooks.inviteManaging) throw new AuthError("permission_denied", 403);
+      const projectId = this.options.projectId;
+      if (!projectId || !uuidPattern.test(projectId)) throw new AuthError("service_unavailable", 503);
+      const actor = Object.freeze({id: session.id, user: Object.freeze({id: user.id, email: user.email})});
+      try { await this.hooks.inviteManaging(port, actor, projectId); }
+      catch (error) {
+        if (error instanceof AuthError) throw error;
+        throw new AuthError("permission_denied", 403);
+      }
+      return work({db, actor});
+    });
+  }
+
+  private async checkInvite(db: Database, email: string, code: string): Promise<AppAuthInvitesRow> {
+    if (!code) throw new AuthError("invite_required", 403);
+    if (!/^[A-Za-z0-9_-]{43}$/.test(code) || Buffer.from(code, "base64url").toString("base64url") !== code) {
+      throw new AuthError("invite_invalid", 403);
+    }
+    const row = (await db.appAuthInvites.findMany({where: c => c.codeHash.equals(hashToken(code)), limit: 1}))[0];
+    if (!row || row.email !== email || row.redeemedAt !== null || row.redeemedBy !== null ||
+        row.revokedAt !== null || Date.parse(row.expiresAt) <= this.now()) throw new AuthError("invite_invalid", 403);
+    return row;
+  }
+
+  private async lockInvite(db: Database, email: string, code: string): Promise<AppAuthInvitesRow | undefined> {
+    if (this.options.signup !== "invite-only") return undefined;
+    const candidate = await this.checkInvite(db, email, code);
+    const row = await db.appAuthInvites.updateIf({id: candidate.id}, c => and(c.codeHash.equals(hashToken(code)),
+      c.email.equals(email), c.redeemedAt.isNull(), c.redeemedBy.isNull(), c.revokedAt.isNull(),
+      c.expiresAt.equals(candidate.expiresAt), c.expiresAt.greaterThan(this.timestamp())), {expiresAt: candidate.expiresAt});
+    if (!row || Date.parse(row.expiresAt) <= this.now()) throw new AuthError("invite_invalid", 403);
+    return row;
   }
 
   private async created(user: AuthUser): Promise<void> {
@@ -234,6 +378,22 @@ export class Auth {
       // Cleanup must never replace a committed issuance result or expose DB errors.
       try { console.error(`Authentication cleanup failed (${stage}).`); } catch {}
     }
+    await this.cleanupInvites();
+  }
+
+  private async cleanupInvites(): Promise<void> {
+    try {
+      const cutoff = new Date(this.now() - 30 * day).toISOString();
+      const candidates = await this.db.appAuthInvites.findMany({where: c => c.expiresAt.lessThanOrEquals(cutoff),
+        orderBy: c => [c.expiresAt.asc(), c.id.asc()], limit: 32});
+      for (const row of candidates) await this.db.transaction(async tx => {
+        const locked = await tx.appAuthInvites.updateIf({id: row.id},
+          c => and(c.expiresAt.equals(row.expiresAt), c.expiresAt.lessThanOrEquals(cutoff)), {expiresAt: row.expiresAt});
+        if (locked) await tx.appAuthInvites.delete({id: row.id});
+      });
+    } catch {
+      try { console.error("Authentication cleanup failed (invite)."); } catch {}
+    }
   }
 
   private async issue(tx: Database, user: AppAuthUsersRow): Promise<Tokens> {
@@ -273,10 +433,10 @@ function publicUser(user: AppAuthUsersRow): AuthUser {
   return Object.freeze({id:user.id, email:user.email, createdAt:user.createdAt});
 }
 
-function normalizeEmail(value: string): string {
+export function normalizeEmail(value: string): string {
   if (typeof value !== "string") throw new AuthError("invalid_input", 400);
   const email = value.trim().toLowerCase();
-  if (email.length > 320 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new AuthError("invalid_input", 400);
+  if (email.includes("\0") || email.length > 320 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new AuthError("invalid_input", 400);
   return email;
 }
 
@@ -292,4 +452,35 @@ function validateToken(value: string): void {
 
 function uniqueViolation(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "23505";
+}
+
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function inviteID(value: string): string {
+  if (typeof value !== "string" || !uuidPattern.test(value)) throw new AuthError("invalid_input", 400);
+  return value.toLowerCase();
+}
+
+function inviteSummary(row: AppAuthInvitesRow, now: number): InviteSummary {
+  if ((row.redeemedAt === null) !== (row.redeemedBy === null) || row.redeemedAt !== null && row.revokedAt !== null) {
+    throw new AuthError("operation_failed", 500);
+  }
+  const status = row.redeemedAt !== null ? "redeemed" : row.revokedAt !== null ? "revoked"
+    : Date.parse(row.expiresAt) <= now ? "expired" : "issued";
+  return {id: row.id, email: row.email, status, createdAt: row.createdAt, expiresAt: row.expiresAt};
+}
+
+function inviteCursor(value: string): [string, string] | undefined {
+  if (typeof value !== "string") throw new AuthError("invalid_input", 400);
+  if (value === "") return undefined;
+  try {
+    if (value.length > 512 || !/^[A-Za-z0-9_-]+$/.test(value)) throw new Error();
+    const bytes = Buffer.from(value, "base64url");
+    if (bytes.toString("base64url") !== value) throw new Error();
+    const parsed: unknown = JSON.parse(bytes.toString("utf8"));
+    if (!Array.isArray(parsed) || parsed.length !== 2 || typeof parsed[0] !== "string" ||
+        typeof parsed[1] !== "string" || !uuidPattern.test(parsed[1]) ||
+        encodeTimestampValue(parsed[0]) !== parsed[0]) throw new Error();
+    return [parsed[0], parsed[1].toLowerCase()];
+  } catch { throw new AuthError("invalid_input", 400); }
 }

@@ -64,6 +64,110 @@ export const appAuthIdentitiesTable = defineTable<AppAuthIdentitiesRow>({
   },
 });
 
+export interface AppAuthInvitesRow {
+  readonly codeHash: string;
+  readonly createdAt: string;
+  readonly email: string;
+  readonly expiresAt: string;
+  readonly id: string;
+  readonly issuedBy: string;
+  readonly redeemedAt: string | null;
+  readonly redeemedBy: string | null;
+  readonly revokedAt: string | null;
+}
+
+export interface AppAuthInvitesInsert {
+  readonly codeHash: string;
+  readonly createdAt?: string;
+  readonly email: string;
+  readonly expiresAt: string;
+  readonly id?: string;
+  readonly issuedBy: string;
+  readonly redeemedAt?: string | null;
+  readonly redeemedBy?: string | null;
+  readonly revokedAt?: string | null;
+}
+
+export interface AppAuthInvitesUpdate {
+  readonly codeHash?: string;
+  readonly createdAt?: string;
+  readonly email?: string;
+  readonly expiresAt?: string;
+  readonly issuedBy?: string;
+  readonly redeemedAt?: string | null;
+  readonly redeemedBy?: string | null;
+  readonly revokedAt?: string | null;
+}
+
+
+export interface AppAuthInvitesPrimaryKey {
+  readonly id: string;
+}
+
+export const appAuthInvitesTable = defineTable<AppAuthInvitesRow>({
+  name: "app_auth_invites",
+  primaryKey: ["id",],
+  requiredInsertColumns: ["codeHash","email","expiresAt","issuedBy",],
+  columns: {
+    codeHash: {
+      databaseName: "code_hash",
+      encode: (value) => encodeValue("string", false, value),
+      decode: (value) => decodeValue("string", false, value) as string,
+    },
+    createdAt: {
+      databaseName: "created_at",
+      encode: (value) => encodeValue("timestamp", false, value),
+      decode: (value) => decodeValue("timestamp", false, value) as string,
+    },
+    email: {
+      databaseName: "email",
+      encode: (value) => encodeValue("string", false, value),
+      decode: (value) => decodeValue("string", false, value) as string,
+    },
+    expiresAt: {
+      databaseName: "expires_at",
+      encode: (value) => encodeValue("timestamp", false, value),
+      decode: (value) => decodeValue("timestamp", false, value) as string,
+    },
+    id: {
+      databaseName: "id",
+      encode: (value) => encodeValue("id", false, value),
+      decode: (value) => decodeValue("id", false, value) as string,
+    },
+    issuedBy: {
+      databaseName: "issued_by",
+      encode: (value) => encodeValue("id", false, value),
+      decode: (value) => decodeValue("id", false, value) as string,
+    },
+    redeemedAt: {
+      databaseName: "redeemed_at",
+      encode: (value) => encodeValue("timestamp", true, value),
+      decode: (value) => decodeValue("timestamp", true, value) as string | null,
+    },
+    redeemedBy: {
+      databaseName: "redeemed_by",
+      encode: (value) => encodeValue("id", true, value),
+      decode: (value) => decodeValue("id", true, value) as string | null,
+    },
+    revokedAt: {
+      databaseName: "revoked_at",
+      encode: (value) => encodeValue("timestamp", true, value),
+      decode: (value) => decodeValue("timestamp", true, value) as string | null,
+    },
+  },
+  constraints: {
+    codeHash: { unique: true, references: "" },
+    createdAt: { unique: false, references: "" },
+    email: { unique: false, references: "" },
+    expiresAt: { unique: false, references: "" },
+    id: { unique: false, references: "" },
+    issuedBy: { unique: false, references: "app_auth_users.id" },
+    redeemedAt: { unique: false, references: "" },
+    redeemedBy: { unique: false, references: "app_auth_users.id" },
+    revokedAt: { unique: false, references: "" },
+  },
+});
+
 export interface AppAuthRateLimitsRow {
   readonly action: string;
   readonly attemptCount: number;
@@ -365,6 +469,7 @@ export const appAuthUsersTable = defineTable<AppAuthUsersRow>({
 
 export interface Database {
   readonly appAuthIdentities: Repository<AppAuthIdentitiesRow, AppAuthIdentitiesInsert, AppAuthIdentitiesUpdate, AppAuthIdentitiesPrimaryKey>;
+  readonly appAuthInvites: Repository<AppAuthInvitesRow, AppAuthInvitesInsert, AppAuthInvitesUpdate, AppAuthInvitesPrimaryKey>;
   readonly appAuthRateLimits: Repository<AppAuthRateLimitsRow, AppAuthRateLimitsInsert, AppAuthRateLimitsUpdate, AppAuthRateLimitsPrimaryKey>;
   readonly appAuthRefreshTokens: Repository<AppAuthRefreshTokensRow, AppAuthRefreshTokensInsert, AppAuthRefreshTokensUpdate, AppAuthRefreshTokensPrimaryKey>;
   readonly appAuthSessions: Repository<AppAuthSessionsRow, AppAuthSessionsInsert, AppAuthSessionsUpdate, AppAuthSessionsPrimaryKey>;
@@ -375,6 +480,7 @@ export interface Database {
 export function createDatabase(port: DatabasePort): Database {
   return {
     appAuthIdentities: new Repository<AppAuthIdentitiesRow, AppAuthIdentitiesInsert, AppAuthIdentitiesUpdate, AppAuthIdentitiesPrimaryKey>(port, appAuthIdentitiesTable),
+    appAuthInvites: new Repository<AppAuthInvitesRow, AppAuthInvitesInsert, AppAuthInvitesUpdate, AppAuthInvitesPrimaryKey>(port, appAuthInvitesTable),
     appAuthRateLimits: new Repository<AppAuthRateLimitsRow, AppAuthRateLimitsInsert, AppAuthRateLimitsUpdate, AppAuthRateLimitsPrimaryKey>(port, appAuthRateLimitsTable),
     appAuthRefreshTokens: new Repository<AppAuthRefreshTokensRow, AppAuthRefreshTokensInsert, AppAuthRefreshTokensUpdate, AppAuthRefreshTokensPrimaryKey>(port, appAuthRefreshTokensTable),
     appAuthSessions: new Repository<AppAuthSessionsRow, AppAuthSessionsInsert, AppAuthSessionsUpdate, AppAuthSessionsPrimaryKey>(port, appAuthSessionsTable),
