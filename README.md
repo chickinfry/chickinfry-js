@@ -1,32 +1,43 @@
 # @chickinfry/chickinfry-js
 
 Shared TypeScript runtime for Chickinfry generated clients and servers.
+Generated code provides your application's typed services, models, and
+repositories; this package provides their transport, authentication, and ORM
+runtime.
 
-Generated code imports this package; application code normally does not need
-to use it directly.
+## Install
+
+```sh
+npm install @chickinfry/chickinfry-js
+```
+
+This package uses ECMAScript modules (ESM).
+
+## Usage
+
+Generated clients use the HTTP transport to call your application's declared
+operations. You can also call an operation directly:
+
+```js
+import { HTTP } from "@chickinfry/chickinfry-js";
+
+const transport = new HTTP("https://api.example.com");
+const result = await transport.invoke("catalog.list", {});
+console.log(result);
+```
+
+Replace the endpoint and operation with those from your application. Endpoints
+must be HTTPS origins, or HTTP origins with an explicit loopback IP address for
+local development. Authenticated operations use
+`transport.withBearer(accessToken).invoke(...)`.
 
 ## Entry points
 
-- `@chickinfry/chickinfry-js` — HTTP transport with session refresh, operation
-  errors, and the type-safe ORM core.
-- `@chickinfry/chickinfry-js/auth` — authentication core used by generated
-  servers (signup, signin, session verification, token rotation, rate limits).
-- `@chickinfry/chickinfry-js/postgres` — PostgreSQL adapter for the ORM.
+- `@chickinfry/chickinfry-js`: HTTP transport, operation errors, session
+  refresh, and the type-safe ORM core.
+- `@chickinfry/chickinfry-js/auth`: authentication runtime for generated servers.
+- `@chickinfry/chickinfry-js/postgres`: PostgreSQL adapter for generated repositories.
 
-## Development
+## License
 
-```
-npm install
-npm run build
-npm test
-```
-
-The private authentication repository under `src/auth/private` is generated
-from the compiler schema and must not be edited. Regenerate it from a
-chickinfry CLI checkout:
-
-```
-go run ./internal/authpackage /path/to/this/package/src
-```
-
-Tests run without a database. The transport check uses a mocked `fetch`.
+Apache-2.0. See [LICENSE](./LICENSE).

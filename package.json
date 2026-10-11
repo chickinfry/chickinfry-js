@@ -1,17 +1,25 @@
 {
   "name": "@chickinfry/chickinfry-js",
   "version": "0.1.0",
-  "private": true,
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chickinfry/chickinfry-js.git"
+  },
   "type": "module",
   "description": "Shared TypeScript runtime for Chickinfry generated clients and servers.",
   "files": [
-    "src",
-    "dist"
+    "dist",
+    "LICENSE",
+    "README.md"
   ],
   "exports": {
     ".": "./dist/index.js",
     "./auth": "./dist/auth/index.js",
     "./postgres": "./dist/postgres.js"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "tsc",
