@@ -72,6 +72,7 @@ export class Auth {
       throw error;
     }
     await this.created(created!);
+    await this.cleanup();
     return tokens;
   }
 
@@ -82,7 +83,9 @@ export class Auth {
     const user = (await this.db.appAuthUsers.findMany({ where: c => c.email.equals(email), limit: 1 }))[0];
     const matched = await verifyPassword(password, user?.passwordHash ?? null);
     if (!matched || !user || user.disabledAt !== null) throw new AuthError("invalid_credentials", 401);
-    return this.db.transaction(tx => this.issue(tx, user));
+    const tokens = await this.db.transaction(tx => this.issue(tx, user));
+    await this.cleanup();
+    return tokens;
   }
 
   async signinIdentity(providerID: string, credential: unknown): Promise<Tokens> {
@@ -119,6 +122,7 @@ export class Auth {
       throw error;
     }
     if (created) await this.created(created);
+    await this.cleanup();
     return tokens;
   }
 
@@ -177,7 +181,59 @@ export class Auth {
       return {accessToken, refreshToken: nextRefresh, expiresAt, refreshExpiresAt: current.expiresAt, userId: user.id, sessionId: session.id};
     });
     if (!outcome) throw new AuthError("session_revoked", 401);
+    await this.cleanup();
     return outcome;
+  }
+
+  private async cleanup(): Promise<void> {
+    let stage = "refresh";
+    try {
+      const cutoff = this.timestamp();
+      const refresh = await this.db.appAuthRefreshTokens.findMany({
+        where: c => c.expiresAt.lessThanOrEquals(cutoff),
+        orderBy: c => [c.expiresAt.asc(), c.id.asc()], limit: 32,
+      });
+      if (refresh.length) await this.db.transaction(async tx => {
+        for (const candidate of refresh) {
+          const current = await tx.appAuthRefreshTokens.findById({id: candidate.id});
+          if (current && Date.parse(current.expiresAt) <= Date.parse(cutoff)) {
+            await tx.appAuthRefreshTokens.delete({id: current.id});
+          }
+        }
+      });
+
+      stage = "session";
+      const sessions = await this.db.appAuthSessions.findMany({
+        where: c => c.expiresAt.lessThanOrEquals(cutoff),
+        orderBy: c => [c.expiresAt.asc(), c.id.asc()], limit: 32,
+      });
+      for (const candidate of sessions) await this.db.transaction(async tx => {
+        // Lock the parent before checking children, in the same order as refresh.
+        const locked = await tx.appAuthSessions.updateIf({id: candidate.id},
+          c => and(c.expiresAt.equals(candidate.expiresAt), c.expiresAt.lessThanOrEquals(cutoff)),
+          {expiresAt: candidate.expiresAt});
+        if (!locked) return;
+        const children = await tx.appAuthRefreshTokens.findMany({where: c => c.sessionId.equals(locked.id), limit: 1});
+        if (!children.length) await tx.appAuthSessions.delete({id: locked.id});
+      });
+
+      stage = "rate_limit";
+      const limits = await this.db.appAuthRateLimits.findMany({
+        where: c => c.expiresAt.lessThanOrEquals(cutoff),
+        orderBy: c => [c.expiresAt.asc(), c.action.asc(), c.keyHash.asc()], limit: 32,
+      });
+      for (const candidate of limits) await this.db.transaction(async tx => {
+        const key = {action: candidate.action, keyHash: candidate.keyHash};
+        const locked = await tx.appAuthRateLimits.updateIf(key,
+          c => and(c.expiresAt.equals(candidate.expiresAt), c.attemptCount.equals(candidate.attemptCount),
+            c.expiresAt.lessThanOrEquals(cutoff)),
+          {attemptCount: candidate.attemptCount});
+        if (locked) await tx.appAuthRateLimits.delete(key);
+      });
+    } catch {
+      // Cleanup must never replace a committed issuance result or expose DB errors.
+      try { console.error(`Authentication cleanup failed (${stage}).`); } catch {}
+    }
   }
 
   private async issue(tx: Database, user: AppAuthUsersRow): Promise<Tokens> {
