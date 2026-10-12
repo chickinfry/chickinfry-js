@@ -46,6 +46,12 @@ export interface AuthOptions {
   readonly projectId?: string;
 }
 
+/** 생성 서버의 실행 문맥이 정리 완료와 전용 포트 종료까지 소유합니다. */
+export interface AuthCleanupContext {
+  waitUntil(work: Promise<void>): void;
+  createPort(signal: AbortSignal): DatabasePort & { close(): Promise<void> };
+}
+
 export interface InviteSummary {
   readonly id: string;
   readonly email: string;
@@ -55,6 +61,7 @@ export interface InviteSummary {
 }
 
 const day = 24 * 60 * 60_000;
+const cleanupLimit = 2;
 
 export class Auth {
   private readonly providers = new Map<string, IdentityProvider>();
@@ -66,6 +73,7 @@ export class Auth {
     private readonly now = Date.now,
     private readonly hooks: UserCreationHooks = {},
     private readonly options: AuthOptions = {},
+    private readonly cleanupContext?: AuthCleanupContext,
   ) {
     if (options.signup !== undefined && options.signup !== "open" && options.signup !== "invite-only") {
       throw new Error("Invalid signup policy.");
@@ -103,7 +111,7 @@ export class Auth {
       throw error;
     }
     await this.created(created!);
-    await this.cleanup();
+    this.scheduleCleanup();
     return tokens;
   }
 
@@ -115,7 +123,7 @@ export class Auth {
     const matched = await verifyPassword(password, user?.passwordHash ?? null);
     if (!matched || !user || user.disabledAt !== null) throw new AuthError("invalid_credentials", 401);
     const tokens = await this.db.transaction(tx => this.issue(tx, user));
-    await this.cleanup();
+    this.scheduleCleanup();
     return tokens;
   }
 
@@ -161,7 +169,7 @@ export class Auth {
       throw error;
     }
     if (created) await this.created(created);
-    await this.cleanup();
+    this.scheduleCleanup();
     return tokens;
   }
 
@@ -184,7 +192,7 @@ export class Auth {
       }
       throw error;
     }
-    await this.cleanupInvites();
+    this.scheduleCleanup(true);
     return result;
   }
 
@@ -201,7 +209,7 @@ export class Auth {
       return {items: page.map(row => inviteSummary(row, this.now())), nextCursor: rows.length > 50 && last
         ? Buffer.from(JSON.stringify([last.createdAt, last.id])).toString("base64url") : ""};
     });
-    await this.cleanupInvites();
+    this.scheduleCleanup(true);
     return result;
   }
 
@@ -218,7 +226,7 @@ export class Auth {
       if (summary.status === "issued") await tx.db.appAuthInvites.update({id}, {revokedAt: this.timestamp()});
       return {id, status: summary.status === "issued" ? "revoked" as const : summary.status};
     });
-    await this.cleanupInvites();
+    this.scheduleCleanup(true);
     return result;
   }
 
@@ -325,19 +333,45 @@ export class Auth {
       return {accessToken, refreshToken: nextRefresh, expiresAt, refreshExpiresAt: current.expiresAt, userId: user.id, sessionId: session.id};
     });
     if (!outcome) throw new AuthError("session_revoked", 401);
-    await this.cleanup();
+    this.scheduleCleanup();
     return outcome;
   }
 
-  private async cleanup(): Promise<void> {
+  private scheduleCleanup(invitesOnly = false): void {
+    const context = this.cleanupContext;
+    // 실행 소유자가 없으면 물리 정리만 생략하며 만료 판정은 각 인증 경로가 수행합니다.
+    if (!context) return;
+    let accepted = false;
+    const work = Promise.resolve().then(async () => {
+      if (!accepted) return;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5_000);
+      let port: ReturnType<AuthCleanupContext["createPort"]> | undefined;
+      try {
+        port = context.createPort(controller.signal);
+        const db = createDatabase(port);
+        if (invitesOnly) await this.cleanupInvites(db, controller.signal);
+        else await this.cleanup(db, controller.signal);
+      } finally {
+        try { await port?.close(); }
+        finally { clearTimeout(timeout); }
+      }
+    }).catch(() => cleanupFailure("port"));
+    try {
+      context.waitUntil(work);
+      accepted = true;
+    } catch { cleanupFailure("schedule"); }
+  }
+
+  private async cleanup(db: Database, signal: AbortSignal): Promise<void> {
     let stage = "refresh";
     try {
       const cutoff = this.timestamp();
-      const refresh = await this.db.appAuthRefreshTokens.findMany({
+      const refresh = await db.appAuthRefreshTokens.findMany({
         where: c => c.expiresAt.lessThanOrEquals(cutoff),
-        orderBy: c => [c.expiresAt.asc(), c.id.asc()], limit: 32,
+        orderBy: c => [c.expiresAt.asc(), c.id.asc()], limit: cleanupLimit,
       });
-      if (refresh.length) await this.db.transaction(async tx => {
+      if (refresh.length) await db.transaction(async tx => {
         for (const candidate of refresh) {
           const current = await tx.appAuthRefreshTokens.findById({id: candidate.id});
           if (current && Date.parse(current.expiresAt) <= Date.parse(cutoff)) {
@@ -347,12 +381,13 @@ export class Auth {
       });
 
       stage = "session";
-      const sessions = await this.db.appAuthSessions.findMany({
+      signal.throwIfAborted();
+      const sessions = await db.appAuthSessions.findMany({
         where: c => c.expiresAt.lessThanOrEquals(cutoff),
-        orderBy: c => [c.expiresAt.asc(), c.id.asc()], limit: 32,
+        orderBy: c => [c.expiresAt.asc(), c.id.asc()], limit: cleanupLimit,
       });
-      for (const candidate of sessions) await this.db.transaction(async tx => {
-        // Lock the parent before checking children, in the same order as refresh.
+      for (const candidate of sessions) await db.transaction(async tx => {
+        // refresh와 같은 순서로 부모를 잠근 뒤 자식을 확인합니다.
         const locked = await tx.appAuthSessions.updateIf({id: candidate.id},
           c => and(c.expiresAt.equals(candidate.expiresAt), c.expiresAt.lessThanOrEquals(cutoff)),
           {expiresAt: candidate.expiresAt});
@@ -362,11 +397,12 @@ export class Auth {
       });
 
       stage = "rate_limit";
-      const limits = await this.db.appAuthRateLimits.findMany({
+      signal.throwIfAborted();
+      const limits = await db.appAuthRateLimits.findMany({
         where: c => c.expiresAt.lessThanOrEquals(cutoff),
-        orderBy: c => [c.expiresAt.asc(), c.action.asc(), c.keyHash.asc()], limit: 32,
+        orderBy: c => [c.expiresAt.asc(), c.action.asc(), c.keyHash.asc()], limit: cleanupLimit,
       });
-      for (const candidate of limits) await this.db.transaction(async tx => {
+      for (const candidate of limits) await db.transaction(async tx => {
         const key = {action: candidate.action, keyHash: candidate.keyHash};
         const locked = await tx.appAuthRateLimits.updateIf(key,
           c => and(c.expiresAt.equals(candidate.expiresAt), c.attemptCount.equals(candidate.attemptCount),
@@ -375,24 +411,24 @@ export class Auth {
         if (locked) await tx.appAuthRateLimits.delete(key);
       });
     } catch {
-      // Cleanup must never replace a committed issuance result or expose DB errors.
-      try { console.error(`Authentication cleanup failed (${stage}).`); } catch {}
+      cleanupFailure(stage);
     }
-    await this.cleanupInvites();
+    if (!signal.aborted) await this.cleanupInvites(db, signal);
   }
 
-  private async cleanupInvites(): Promise<void> {
+  private async cleanupInvites(db: Database, signal: AbortSignal): Promise<void> {
     try {
+      signal.throwIfAborted();
       const cutoff = new Date(this.now() - 30 * day).toISOString();
-      const candidates = await this.db.appAuthInvites.findMany({where: c => c.expiresAt.lessThanOrEquals(cutoff),
-        orderBy: c => [c.expiresAt.asc(), c.id.asc()], limit: 32});
-      for (const row of candidates) await this.db.transaction(async tx => {
+      const candidates = await db.appAuthInvites.findMany({where: c => c.expiresAt.lessThanOrEquals(cutoff),
+        orderBy: c => [c.expiresAt.asc(), c.id.asc()], limit: cleanupLimit});
+      for (const row of candidates) await db.transaction(async tx => {
         const locked = await tx.appAuthInvites.updateIf({id: row.id},
           c => and(c.expiresAt.equals(row.expiresAt), c.expiresAt.lessThanOrEquals(cutoff)), {expiresAt: row.expiresAt});
         if (locked) await tx.appAuthInvites.delete({id: row.id});
       });
     } catch {
-      try { console.error("Authentication cleanup failed (invite)."); } catch {}
+      cleanupFailure("invite");
     }
   }
 
@@ -427,6 +463,10 @@ export class Auth {
     }
     throw new AuthError("rate_limited", 429);
   }
+}
+
+function cleanupFailure(stage: string): void {
+  try { console.error(`Authentication cleanup failed (${stage}).`); } catch {}
 }
 
 function publicUser(user: AppAuthUsersRow): AuthUser {

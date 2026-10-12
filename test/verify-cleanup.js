@@ -1,0 +1,203 @@
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
+import { Auth, AuthError } from "../dist/auth/runtime.js";
+import { hashToken } from "../dist/auth/crypto.js";
+import { createDatabase } from "../dist/auth/private/database.js";
+import { createPostgresPort } from "../dist/postgres.js";
+
+const url = process.env.CHIK_TEST_DATABASE_URL;
+const port = createPostgresPort(url), other = createPostgresPort(url);
+const db = createDatabase(port);
+const clock = Date.parse("2029-01-01T00:00:00Z"), now = () => clock;
+const expired = "2020-01-01T00:00:00.000Z";
+const password = "correct horse battery staple";
+const rejects = (work, code) => assert.rejects(work, error => error instanceof AuthError && error.code === code);
+const observe = (base, before, after) => ({
+  async query(sql, args) {
+    await before?.(sql, args);
+    const result = await base.query(sql, args);
+    await after?.(sql, args, result);
+    return result;
+  },
+  transaction(work) { return base.transaction(tx => work(observe(tx, before, after))); },
+});
+const tasks = [];
+let closes = 0;
+const context = (before, after) => ({
+  waitUntil(work) { tasks.push(work); },
+  createPort(signal) {
+    const base = createPostgresPort(url, signal);
+    return {...observe(base, before, after), async close() { closes++; await base.close(); }};
+  },
+});
+const drain = async () => { await Promise.all(tasks.splice(0)); };
+const logs = [], originalLog = console.error;
+console.error = (...args) => logs.push(args);
+
+try {
+  const auth = new Auth(port, [], now);
+  const email = `cleanup-${randomUUID()}@example.test`;
+  const owner = await auth.signup(email, password);
+  const doomed = await auth.signin(email, password);
+  await db.appAuthSessions.update({id: doomed.sessionId}, {expiresAt: expired});
+  const doomedRefresh = (await db.appAuthRefreshTokens.findMany({where: c => c.sessionId.equals(doomed.sessionId)}))[0];
+  await db.appAuthRefreshTokens.update({id: doomedRefresh.id}, {expiresAt: expired});
+  await rejects(auth.session(doomed.accessToken), "invalid_token");
+  await rejects(auth.refresh(doomed.refreshToken), "session_revoked");
+  assert.ok(await db.appAuthRefreshTokens.findById({id: doomedRefresh.id}));
+  await db.appAuthRateLimits.insert({action: "signin", keyHash: hashToken("expired-limit@example.test"), attemptCount: 10, expiresAt: expired});
+  await rejects(auth.signin("expired-limit@example.test", password), "invalid_credentials");
+  assert.equal((await db.appAuthRateLimits.findById({action: "signin", keyHash: hashToken("expired-limit@example.test")})).attemptCount, 1);
+
+  for (let i = 0; i < 32; i++) {
+    const session = await db.appAuthSessions.insert({userId: owner.userId, tokenHash: hashToken(randomUUID()), userSessionVersion: 0, expiresAt: expired});
+    await db.appAuthRefreshTokens.insert({sessionId: session.id, tokenHash: hashToken(randomUUID()), expiresAt: expired});
+    await db.appAuthRateLimits.insert({action: "cleanup", keyHash: hashToken(randomUUID()), attemptCount: 1, expiresAt: expired});
+    await db.appAuthInvites.insert({email: `expired-${i}@example.test`, codeHash: hashToken(randomUUID()), issuedBy: owner.userId, expiresAt: expired});
+  }
+  const started = Promise.withResolvers(), release = Promise.withResolvers();
+  let rounds = 0, deleted = 0;
+  const delayed = context(async sql => {
+    started.resolve();
+    await release.promise;
+    rounds++;
+    await delay(100);
+  }, async (sql, args, rows) => { if (sql.startsWith("delete")) deleted += rows.length; });
+  const requestPort = createPostgresPort(url);
+  const begin = performance.now();
+  const tokens = await new Auth(requestPort, [], now, {}, {}, delayed).signin(email, password);
+  const responseMillis = performance.now() - begin;
+  await started.promise;
+  assert.equal(rounds, 0, "정리를 막아도 인증 응답은 완료되어야 합니다");
+  await requestPort.close();
+  const cleanupStart = performance.now();
+  release.resolve();
+  await drain();
+  const cleanupMillis = performance.now() - cleanupStart;
+  assert.equal(closes, 1);
+  assert.ok(rounds <= 22 && deleted <= 8, "한 번의 정리는 적체 전체를 처리하지 않습니다");
+  assert.ok(cleanupMillis >= 1000 && responseMillis < cleanupMillis);
+  assert.equal((await auth.session(tokens.accessToken)).id, owner.userId);
+  assert.ok((await db.appAuthInvites.findMany({where: c => c.expiresAt.equals(expired)})).length > 0);
+  console.log(JSON.stringify({risk: "backlog-delay", responseMillis: +responseMillis.toFixed(1), cleanupMillis: +cleanupMillis.toFixed(1), ormQueries: rounds, deleted}));
+
+  // 별도 보존·경합 검사가 앞선 인공 적체의 후보 순서에 가려지지 않게 제거합니다.
+  for (const row of await db.appAuthRefreshTokens.findMany({where: c => c.expiresAt.equals(expired)})) await db.appAuthRefreshTokens.delete({id: row.id});
+  for (const row of await db.appAuthSessions.findMany({where: c => c.expiresAt.equals(expired)})) await db.appAuthSessions.delete({id: row.id});
+  for (const row of await db.appAuthRateLimits.findMany({where: c => c.expiresAt.equals(expired)})) await db.appAuthRateLimits.delete({action: row.action, keyHash: row.keyHash});
+  for (const row of await db.appAuthInvites.findMany({where: c => c.expiresAt.equals(expired)})) await db.appAuthInvites.delete({id: row.id});
+
+  // 만료 access에 살아 있는 refresh가 있으면 부모 잠금을 획득한 순서와 무관하게 보존합니다.
+  for (const refreshFirst of [true, false]) {
+    const live = await auth.signin(email, password);
+    const cutoff = new Date(clock - 1).toISOString();
+    await db.appAuthSessions.update({id: live.sessionId}, {expiresAt: cutoff});
+    // 앞선 적체를 제거하지 않고 가장 오래된 부모 후보로 만듭니다.
+    await db.appAuthSessions.update({id: live.sessionId}, {expiresAt: "2010-01-01T00:00:00.000Z"});
+    const locked = Promise.withResolvers(), attempted = Promise.withResolvers();
+    const winner = observe(port, undefined, async (sql, args, rows) => {
+      if (sql.startsWith('update "public"."app_auth_sessions"') && rows[0]?.id === live.sessionId) {
+        locked.resolve();
+        await attempted.promise;
+      }
+    });
+    const loser = observe(other, async (sql, args) => {
+      if (sql.startsWith('update "public"."app_auth_sessions"') && args.includes(live.sessionId)) attempted.resolve();
+    });
+    const cleanup = (base) => ({waitUntil(work) { tasks.push(work); }, createPort() {
+      return {...base, async close() { closes++; }};
+    }});
+    let refreshed;
+    if (refreshFirst) {
+      const refreshing = new Auth(winner, [], now).refresh(live.refreshToken);
+      await locked.promise;
+      await new Auth(other, [], now, {}, {}, cleanup(loser)).signin(email, password);
+      refreshed = await refreshing;
+    } else {
+      await new Auth(other, [], now, {}, {}, cleanup(winner)).signup(`race-${randomUUID()}@example.test`, password);
+      await locked.promise;
+      refreshed = await new Auth(loser, [], now).refresh(live.refreshToken);
+    }
+    await drain();
+    await new Auth(port, [], now, {}, {}, context()).signup(`retention-${randomUUID()}@example.test`, password);
+    await drain();
+    assert.equal((await auth.session(refreshed.accessToken)).sessionId, live.sessionId);
+    const children = await db.appAuthRefreshTokens.findMany({where: c => c.sessionId.equals(live.sessionId)});
+    assert.equal(children.length, 2);
+    assert.equal(children.filter(row => row.consumedAt !== null).length, 1);
+    await rejects(auth.refresh(live.refreshToken), "session_revoked");
+    await rejects(auth.session(refreshed.accessToken), "invalid_token");
+  }
+  assert.deepEqual(logs, []);
+
+  const gate = Promise.withResolvers();
+  const detached = context(() => gate.promise);
+  const provider = {id: "cleanup", async verify() { return {subject: "employee", verifiedEmail: `identity-${randomUUID()}@example.test`}; }};
+  const flow = new Auth(port, [provider], now, {}, {}, detached);
+  const signup = await flow.signup(`flow-${randomUUID()}@example.test`, password);
+  const identity = await flow.signinIdentity(provider.id, "fixture");
+  const refreshed = await flow.refresh(signup.refreshToken);
+  const hooks = {async inviteManaging() {}};
+  const invites = new Auth(port, [], now, hooks, {signup: "invite-only", projectId: randomUUID()}, detached);
+  const issued = await invites.inviteIssue(owner.accessToken, randomUUID(), "flow-invite@example.test");
+  assert.ok((await invites.inviteList(owner.accessToken, "")).items.some(row => row.id === issued.id));
+  assert.equal((await invites.inviteRevoke(owner.accessToken, issued.id)).status, "revoked");
+  assert.equal((await auth.session(identity.accessToken)).id, identity.userId);
+  assert.equal((await auth.session(refreshed.accessToken)).sessionId, signup.sessionId);
+  const scheduled = tasks.length;
+  await rejects(invites.signup("missing-invite@example.test", password), "invite_required");
+  await rejects(flow.refresh("x".repeat(43)), "invalid_token");
+  assert.equal(tasks.length, scheduled);
+  gate.resolve();
+  await drain();
+
+  // 거부된 등록은 포트를 만들지 않으며 factory·close 실패도 커밋된 결과를 바꾸지 않습니다.
+  for (const failure of ["schedule", "create", "close"]) {
+    let created = 0;
+    const failing = {
+      waitUntil(work) { if (failure === "schedule") throw new Error("private schedule detail"); tasks.push(work); },
+      createPort(signal) {
+        created++;
+        if (failure === "create") throw new Error("private factory detail");
+        const base = createPostgresPort(url, signal);
+        return {...base, async close() { await base.close(); throw new Error("private close detail"); }};
+      },
+    };
+    const result = await new Auth(port, [], now, {}, {}, failing).signup(`failure-${failure}-${randomUUID()}@example.test`, password);
+    await drain();
+    assert.equal(created, failure === "schedule" ? 0 : 1);
+    assert.equal((await auth.session(result.accessToken)).id, result.userId);
+  }
+
+  // 실제 DB 잠금 대기를 중단하고 미커밋 삭제가 남지 않는지 확인합니다.
+  const blocked = await db.appAuthSessions.insert({userId: owner.userId, tokenHash: hashToken(randomUUID()), userSessionVersion: 0, expiresAt: "2000-01-01T00:00:00.000Z"});
+  const holding = Promise.withResolvers(), unlock = Promise.withResolvers();
+  const lock = other.transaction(async tx => {
+    await createDatabase(tx).appAuthSessions.update({id: blocked.id}, {expiresAt: blocked.expiresAt});
+    holding.resolve();
+    await unlock.promise;
+  });
+  await holding.promise;
+  let cleanupSignal;
+  const bounded = context();
+  const budget = {...bounded, createPort(signal) { cleanupSignal = signal; return bounded.createPort(signal); }};
+  const deadlineStart = performance.now();
+  const unaffected = await new Auth(port, [], now, {}, {}, budget).signup(`deadline-${randomUUID()}@example.test`, password);
+  try {
+    await drain();
+    const deadlineMillis = performance.now() - deadlineStart;
+    assert.ok(cleanupSignal.aborted);
+    assert.ok(deadlineMillis < 6500);
+    assert.ok(await db.appAuthSessions.findById({id: blocked.id}));
+    assert.equal((await auth.session(unaffected.accessToken)).id, unaffected.userId);
+    console.log(JSON.stringify({risk: "locked-cleanup-deadline", deadlineMillis: +deadlineMillis.toFixed(1)}));
+  } finally { unlock.resolve(); await lock; }
+  assert.ok(logs.flat().every(value => !String(value).includes("private")));
+  console.log("Authentication cleanup: detached response, bounded backlog, both parent-lock orders, consumed refresh retention, no-context expiry, rejected scheduling, port failures and deadline rollback passed.");
+} finally {
+  await drain();
+  console.error = originalLog;
+  await other.close();
+  await port.close();
+}

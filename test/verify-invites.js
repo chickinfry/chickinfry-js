@@ -197,17 +197,29 @@ try {
   const beforeCleanup = (await db.appAuthInvites.findMany()).length;
   clock = expiry + 30 * 86400000;
   const cleanupLogin = await open.signin("owner@example.test", password);
+  assert.equal((await db.appAuthInvites.findMany()).length, beforeCleanup);
+  const pending = [];
+  const cleanup = {
+    waitUntil(work) { pending.push(work); },
+    createPort(signal) { return createPostgresPort(process.env.CHIK_TEST_DATABASE_URL, signal); },
+  };
+  await new Auth(port, [], now, {}, {}, cleanup).signin("owner@example.test", password);
+  await Promise.all(pending.splice(0));
   const afterCleanup = (await db.appAuthInvites.findMany()).length;
-  assert.equal(beforeCleanup - afterCleanup, 32);
+  assert.equal(beforeCleanup - afterCleanup, 2);
   assert.ok(afterCleanup > 0);
   let deleteFailures = 0;
-  const fault = observe(port, async sql => {
-    if (sql.startsWith('delete from "public"."app_auth_invites"') && ++deleteFailures === 1) {
-      throw new Error(`private cleanup error ${invitation.code} ${stored.codeHash}`);
-    }
-  });
-  const cleanupIssue = await new Auth(fault, [], now, hooks, options)
+  const fault = { ...cleanup, createPort(signal) {
+    const base = createPostgresPort(process.env.CHIK_TEST_DATABASE_URL, signal);
+    return {...observe(base, async sql => {
+      if (sql.startsWith('delete from "public"."app_auth_invites"') && ++deleteFailures === 1) {
+        throw new Error(`private cleanup error ${invitation.code} ${stored.codeHash}`);
+      }
+    }), close: () => base.close()};
+  }};
+  const cleanupIssue = await new Auth(port, [], now, hooks, options, fault)
     .inviteIssue(cleanupLogin.accessToken, randomUUID(), "cleanup-failure@example.test");
+  await Promise.all(pending.splice(0));
   assert.equal(cleanupIssue.status, "issued");
   assert.ok(await db.appAuthInvites.findById({id: cleanupIssue.id}));
   assert.equal(deleteFailures, 1);
@@ -221,3 +233,5 @@ try {
   await other.close();
   await port.close();
 }
+
+await import("./verify-cleanup.js");
