@@ -1,4 +1,4 @@
-import { HTTP, OperationError } from "../src/http.js";
+import { HTTP, BrowserHTTP, OperationError } from "../src/http.js";
 
 const oldAccessToken = "a".repeat(43);
 const newAccessToken = "c".repeat(43);
@@ -26,6 +26,7 @@ const store = {
 };
 const originalFetch = globalThis.fetch;
 globalThis.fetch = async (input, init) => {
+  if (init?.credentials !== "omit" || init.cache !== "no-store") throw new Error("Native credential isolation failed.");
   const url = new URL(String(input));
   if (url.pathname === "/auth.refresh") {
     refreshes += 1;
@@ -43,7 +44,7 @@ try {
   const secondTransport = new HTTP("https://example.com").withSession(store);
   await Promise.all(Array.from({length:8},index => (index%2 ? secondTransport : transport).invoke("catalog.create",{})));
   if (refreshes !== 1 || accessToken !== newAccessToken || refreshToken !== "d".repeat(43) || cleared) {
-    throw new Error("refresh state mismatch: "+refreshes+" "+accessToken+" "+refreshToken+" "+cleared);
+    throw new Error("Refresh state mismatch.");
   }
   rejectRefresh = true;
   accessToken = oldAccessToken;
@@ -57,6 +58,22 @@ try {
   if (!cleared || refreshes !== 2) {
     throw new Error("failure state mismatch: "+cleared+" "+refreshes);
   }
+  let calls = 0;
+  globalThis.fetch = async (_input, init) => {
+    calls++;
+    const headers = new Headers(init?.headers);
+    if (headers.has("authorization") || headers.get("x-chik-browser") !== "1" ||
+        init?.credentials !== "include" || init.cache !== "no-store" || init.redirect !== "manual") {
+      throw new Error("Browser transport boundary failed.");
+    }
+    return Response.json({error: "invalid_token"}, {status: 401});
+  };
+  const browser = new BrowserHTTP("http://localhost:8012");
+  await Promise.all(Array.from({length: 8}, async () => {
+    try { await browser.invoke("catalog.create", {}); throw new Error("Rejected browser request succeeded."); }
+    catch (error) { if (!(error instanceof OperationError) || error.status !== 401) throw error; }
+  }));
+  if (calls !== 8) throw new Error("Browser request was retried.");
 } finally {
   globalThis.fetch = originalFetch;
 }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { Auth, AuthError, invokeAuth, normalizeEmail } from "../dist/auth/index.js";
+import { Auth, AuthError, invokeAuth, normalizeEmail, browserRequest } from "../dist/auth/index.js";
 import { hashToken } from "../dist/auth/crypto.js";
 import { createDatabase } from "../dist/auth/private/database.js";
 import { createPostgresPort } from "../dist/postgres.js";
@@ -22,6 +22,39 @@ const originalLog = console.error;
 console.error = (...args) => logs.push(args);
 try {
   const open = new Auth(port, [], now);
+  const browser = await open.signup("browser@example.test", password, "", "browser");
+  const storedBrowser = await db.appAuthSessions.findById({id: browser.sessionId});
+  assert.ok(storedBrowser.transport === "browser" && storedBrowser.tokenHash === hashToken(browser.credential));
+  assert.equal((await db.appAuthRefreshTokens.findMany({where: c => c.sessionId.equals(browser.sessionId)})).length, 0);
+  assert.ok(Date.parse(storedBrowser.createdAt) === clock);
+  assert.equal(Date.parse(browser.expiresAt) - Date.parse(storedBrowser.createdAt), 604800000);
+  await rejects(open.session(browser.credential), "invalid_token");
+  await rejects(open.refresh(browser.credential), "invalid_token");
+  const browserRequestHeaders = {"origin": "https://web.example.test", "x-chik-browser": "1", "content-type": "application/json"};
+  const origins = new Set([browserRequestHeaders.origin]);
+  const req = headers => new Request("https://api.example.test/auth.browser_session", {method: "POST", headers});
+  assert.ok(browserRequest(req({authorization:"Bearer "+browser.credential}), "", origins) === undefined);
+  const parsed = browserRequest(req(browserRequestHeaders), options.projectId, origins);
+  const cookie = `${parsed.cookieName}=${browser.credential}`;
+  const authenticatedRequest = req({...browserRequestHeaders, cookie});
+  const context = {...browserRequest(authenticatedRequest, options.projectId, origins), headers: new Headers()};
+  const wireBrowser = await invokeAuth(open, "auth.browser_session", {}, authenticatedRequest, context);
+  assert.deepEqual(Object.keys(wireBrowser).sort(), ["email", "expires_at", "id", "session_id"]);
+  assert.ok(!JSON.stringify(wireBrowser).includes(browser.credential));
+  assert.equal(context.headers.has("set-cookie"), false);
+  for (const headers of [ {...browserRequestHeaders, origin: "https://evil.example.test", cookie},
+    {...browserRequestHeaders, authorization: "Bearer " + browser.credential, cookie},
+    {...browserRequestHeaders, cookie: cookie + "; " + cookie}, {...browserRequestHeaders, "sec-fetch-site": "cross-site"}]) {
+    assert.throws(() => browserRequest(req(headers), options.projectId, origins), AuthError);
+  }
+  clock = Date.parse(browser.expiresAt) - 1;
+  assert.ok((await open.session(browser.credential, "browser")).sessionId === browser.sessionId);
+  assert.equal((await db.appAuthSessions.findById({id: browser.sessionId})).expiresAt, browser.expiresAt);
+  clock++;
+  await rejects(open.session(browser.credential, "browser"), "invalid_token");
+  await open.logout(browser.credential, "browser");
+  await open.logout(browser.credential, "browser");
+  clock = Date.parse("2030-01-01T00:00:00Z");
   const owner = await open.signup("owner@example.test", password);
   const outsider = await open.signup("outsider@example.test", password);
   let authorizations = 0;
@@ -32,6 +65,7 @@ try {
     authorizations++;
   }};
   const closed = new Auth(port, [], now, hooks, options);
+  await rejects(closed.inviteList(owner.accessToken, "", "browser"), "invalid_input");
   const issue = email => closed.inviteIssue(owner.accessToken, randomUUID(), email);
   await rejects(new Auth(port, [], now, {}, options).inviteList(owner.accessToken, ""), "permission_denied");
   await rejects(new Auth(port, [], now, hooks, {signup: "invite-only"}).inviteList(owner.accessToken, ""), "service_unavailable");

@@ -310,6 +310,7 @@ export interface AppAuthSessionsRow {
   readonly id: string;
   readonly revokedAt: string | null;
   readonly tokenHash: string;
+  readonly transport: string;
   readonly userId: string;
   readonly userSessionVersion: number;
 }
@@ -320,6 +321,7 @@ export interface AppAuthSessionsInsert {
   readonly id?: string;
   readonly revokedAt?: string | null;
   readonly tokenHash: string;
+  readonly transport?: string;
   readonly userId: string;
   readonly userSessionVersion: number;
 }
@@ -329,6 +331,7 @@ export interface AppAuthSessionsUpdate {
   readonly expiresAt?: string;
   readonly revokedAt?: string | null;
   readonly tokenHash?: string;
+  readonly transport?: string;
   readonly userId?: string;
   readonly userSessionVersion?: number;
 }
@@ -368,6 +371,11 @@ export const appAuthSessionsTable = defineTable<AppAuthSessionsRow>({
       encode: (value) => encodeValue("string", false, value),
       decode: (value) => decodeValue("string", false, value) as string,
     },
+    transport: {
+      databaseName: "transport",
+      encode: (value) => encodeValue("string", false, value),
+      decode: (value) => decodeValue("string", false, value) as string,
+    },
     userId: {
       databaseName: "user_id",
       encode: (value) => encodeValue("id", false, value),
@@ -385,6 +393,7 @@ export const appAuthSessionsTable = defineTable<AppAuthSessionsRow>({
     id: { unique: false, references: "" },
     revokedAt: { unique: false, references: "" },
     tokenHash: { unique: true, references: "" },
+    transport: { unique: false, references: "" },
     userId: { unique: false, references: "app_auth_users.id" },
     userSessionVersion: { unique: false, references: "" },
   },

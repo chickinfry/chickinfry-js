@@ -1,6 +1,7 @@
-import { Auth, AuthError, type Tokens, type InviteSummary } from "./runtime.js";
+import { Auth, AuthError, type Tokens, type InviteSummary, type BrowserSession } from "./runtime.js";
 
 export const authOperations = ["auth.signup", "auth.signin", "auth.refresh", "auth.session", "auth.logout", "auth.identity",
+  "auth.browser_signup", "auth.browser_signin", "auth.browser_identity", "auth.browser_session", "auth.browser_logout",
   "auth.invite_issue", "auth.invite_list", "auth.invite_revoke"];
 
 export function bearer(request: Request): string {
@@ -9,7 +10,7 @@ export function bearer(request: Request): string {
   return match[1]!;
 }
 
-export async function invokeAuth(auth: Auth, operation: string, input: unknown, request: Request): Promise<unknown> {
+export async function invokeAuth(auth: Auth, operation: string, input: unknown, request: Request, browser?: BrowserRequest & {headers: Headers}): Promise<unknown> {
   if (typeof input !== "object" || input === null || Array.isArray(input)) throw new AuthError("invalid_input", 400);
   const value = input as Record<string, unknown>;
   const text = (key: string): string => {
@@ -18,9 +19,29 @@ export async function invokeAuth(auth: Auth, operation: string, input: unknown, 
   };
   const inviteCode = (): string => Object.hasOwn(value, "invite_code") ? text("invite_code") : "";
   const managementToken = (): string => {
+    if (browser) return browser.credential;
     if (!request.headers.has("authorization")) throw new AuthError("unauthenticated", 401);
     return bearer(request);
   };
+  if (operation.startsWith("auth.browser_")) {
+    if (!browser) throw new AuthError("invalid_input", 400);
+    let result: BrowserSession;
+    switch (operation) {
+      case "auth.browser_signup": result = await auth.signup(text("email"), text("password"), inviteCode(), "browser"); break;
+      case "auth.browser_signin": result = await auth.signin(text("email"), text("password"), "browser"); break;
+      case "auth.browser_identity": result = await auth.signinIdentity(text("provider"), value.credential, inviteCode(), "browser"); break;
+      case "auth.browser_session": return browserInfo(await auth.session(browser.credential, "browser"));
+      case "auth.browser_logout":
+        await auth.logout(browser.credential, "browser");
+        browser.headers.set("set-cookie", browserCookie(browser.cookieName, "", 0));
+        return {status: "ok"};
+      default: throw new AuthError("not_found", 404);
+    }
+    browser.headers.set("set-cookie", browserCookie(browser.cookieName, result.credential,
+      Math.max(0, Math.min(604800, Math.floor((Date.parse(result.expiresAt) - Date.now()) / 1000)))));
+    return browserInfo(result);
+  }
+  if (browser && !operation.startsWith("auth.invite_")) throw new AuthError("invalid_input", 400);
   switch (operation) {
     case "auth.signup": return tokens(await auth.signup(text("email"), text("password"), inviteCode()));
     case "auth.signin": return tokens(await auth.signin(text("email"), text("password")));
@@ -33,17 +54,17 @@ export async function invokeAuth(auth: Auth, operation: string, input: unknown, 
     case "auth.identity": return tokens(await auth.signinIdentity(text("provider"), value.credential, inviteCode()));
     case "auth.invite_issue": {
       const id = text("id"), email = text("email");
-      const result = await auth.inviteIssue(managementToken(), id, email);
+      const result = await auth.inviteIssue(managementToken(), id, email, browser ? "browser" : "native");
       return {...summary(result), code: result.code};
     }
     case "auth.invite_list": {
       const cursor = text("cursor");
-      const result = await auth.inviteList(managementToken(), cursor);
+      const result = await auth.inviteList(managementToken(), cursor, browser ? "browser" : "native");
       return {items: result.items.map(summary), next_cursor: result.nextCursor};
     }
     case "auth.invite_revoke": {
       const id = text("id");
-      return auth.inviteRevoke(managementToken(), id);
+      return auth.inviteRevoke(managementToken(), id, browser ? "browser" : "native");
     }
     default: throw new AuthError("not_found", 404);
   }
@@ -58,4 +79,37 @@ function tokens(value: Tokens) {
   return {access_token: value.accessToken, refresh_token: value.refreshToken,
     expires_at: value.expiresAt, refresh_expires_at: value.refreshExpiresAt,
     user_id: value.userId, session_id: value.sessionId};
+}
+
+export interface BrowserRequest {
+  readonly credential: string;
+  readonly cookieName: string;
+}
+
+/** Validates browser transport before any database or application effects. */
+export function browserRequest(request: Request, projectId: string, origins: ReadonlySet<string>): BrowserRequest | undefined {
+  const cookies = (request.headers.get("cookie") ?? "").split(";").map(item => item.trim());
+  const marker = request.headers.get("x-chik-browser");
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(projectId)) {
+    if (marker === null && !cookies.some(item => item.split("=", 1)[0]!.startsWith("__Host-chik_session_"))) return undefined;
+    throw new AuthError("service_unavailable", 503);
+  }
+  const cookieName = `__Host-chik_session_${projectId.toLowerCase()}`;
+  const matches = cookies.filter(item => item.split("=", 1)[0] === cookieName);
+  if (marker === null && matches.length === 0) return undefined;
+  if (request.headers.has("authorization") || matches.length > 1) throw new AuthError("invalid_input", 400);
+  if (marker !== "1" || !origins.has(request.headers.get("origin") ?? "") ||
+      request.headers.get("sec-fetch-site") === "cross-site") throw new AuthError("origin_denied", 403);
+  if (request.method !== "POST" || request.headers.get("content-type")?.split(";", 1)[0] !== "application/json") {
+    throw new AuthError("invalid_input", 400);
+  }
+  return {cookieName, credential: matches[0]?.slice(cookieName.length + 1) ?? ""};
+}
+
+export function browserCookie(name: string, value: string, maxAge: number): string {
+  return `${name}=${value}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=${maxAge}`;
+}
+
+function browserInfo(value: {id: string; email: string; sessionId: string; expiresAt: string}) {
+  return {id: value.id, email: value.email, session_id: value.sessionId, expires_at: value.expiresAt};
 }

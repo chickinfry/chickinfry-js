@@ -35,5 +35,6 @@
     "@types/pg": "8.23.1",
     "esbuild": "0.28.2",
     "typescript": "7.0.2"
-  }
+  },
+  "chickinfryGenerator": "2159e17a579586604786580a9197decffef2eaad"
 }

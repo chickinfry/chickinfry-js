@@ -41,3 +41,7 @@ local development. Authenticated operations use
 ## License
 
 Apache-2.0. See [LICENSE](./LICENSE).
+
+Browser clients use the generated `createBrowserClient(origin)` when `auth.browser_session` is enabled. The cookie-only transport sends `X-Chik-Browser: 1` with credentials included and never stores tokens, refreshes sessions, or retries operations. Bearer transport omits cookies. Browser sessions use a project-specific HttpOnly, Secure, host-only cookie with SameSite=Strict and an absolute seven-day lifetime.
+
+Local HTTP browser sessions work in Chromium and Firefox; Safari/WebKit does not store this Secure cookie on local HTTP. Use the existing local endpoint without weakening cookie attributes. Remote browser sessions require a same-site HTTPS frontend and API; local browser results do not establish production ingress support.

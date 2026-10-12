@@ -18,15 +18,7 @@ export class HTTP implements ClientTransport {
 
   constructor(origin: string, private readonly token?: string) {
     if (token !== undefined && !validToken(token)) throw new Error("Invalid access token.");
-    let url: URL;
-    try { url = new URL(origin); }
-    catch { throw new Error("Invalid operation endpoint."); }
-    const loopback = url.hostname === "[::1]" || /^127\.\d+\.\d+\.\d+$/.test(url.hostname);
-    const secure = url.protocol === "https:" || (url.protocol === "http:" && loopback);
-    if (!secure || url.username || url.password || url.pathname !== "/" || url.search || url.hash) {
-      throw new Error("Operation endpoint must be an HTTPS or loopback HTTP origin.");
-    }
-    this.origin = url.origin;
+    this.origin = operationOrigin(origin);
   }
 
   withBearer(token: string): HTTP {
@@ -93,47 +85,9 @@ export class HTTP implements ClientTransport {
   }
 
   private async invokeOnce(operation: string, input: Readonly<Record<string, unknown>>, token: string | undefined): Promise<unknown> {
-    if (!/^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$/.test(operation)) {
-      throw new Error("Invalid operation name.");
-    }
-    const body = JSON.stringify(input);
-    if (new TextEncoder().encode(body).byteLength > 4 << 20) throw new Error("Operation request is too large.");
-    const headers = new Headers({"content-type":"application/json"});
-    if (token !== undefined) headers.set("authorization", "Bearer "+token);
-    const response = await fetch(`${this.origin}/${operation}`, {
-      method: "POST", headers, body,
-      redirect: "manual", signal: AbortSignal.timeout(30_000),
-    });
-    if (response.type === "opaqueredirect" || (response.status >= 300 && response.status < 400)) {
-      await response.body?.cancel();
-      throw new OperationError("redirect_not_allowed", response.status);
-    }
-    const reader = response.body?.getReader();
-    const chunks: Uint8Array[] = [];
-    let size = 0;
-    if (reader) {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        size += value.byteLength;
-        if (size > 1 << 20) {
-          await reader.cancel();
-          throw new Error("Operation response is too large.");
-        }
-        chunks.push(value);
-      }
-    }
-    const bytes = new Uint8Array(size);
-    let offset = 0;
-    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-    let value: unknown;
-    try { value = JSON.parse(new TextDecoder().decode(bytes)); }
-    catch { throw new OperationError("invalid_response", response.status); }
-    if (!response.ok) {
-      const code = typeof value === "object" && value !== null && "error" in value ? value.error : undefined;
-      throw new OperationError(typeof code === "string" && /^[a-z_]+$/.test(code) ? code : "operation_failed", response.status);
-    }
-    return value;
+    const headers = new Headers({"content-type": "application/json"});
+    if (token !== undefined) headers.set("authorization", "Bearer " + token);
+    return invokeHTTP(this.origin, operation, input, headers, "omit");
   }
 }
 
@@ -171,4 +125,69 @@ function readCredentials(value: unknown): SessionCredentials {
     throw new Error("Invalid refresh response.");
   }
   return {accessToken,refreshToken,expiresAt,refreshExpiresAt,userId,sessionId};
+}
+
+/** Cookie-only transport with no refresh, credential storage, or replay. */
+export class BrowserHTTP implements ClientTransport {
+  private readonly origin: string;
+  constructor(origin: string) { this.origin = operationOrigin(origin); }
+  invoke(operation: string, input: Readonly<Record<string, unknown>>): Promise<unknown> {
+    return invokeHTTP(this.origin, operation, input,
+      new Headers({"content-type": "application/json", "x-chik-browser": "1"}), "include");
+  }
+}
+
+function operationOrigin(origin: string): string {
+    let url: URL;
+    try { url = new URL(origin); }
+    catch { throw new Error("Invalid operation endpoint."); }
+    const loopback = url.hostname === "localhost" || url.hostname === "[::1]" || /^127\.\d+\.\d+\.\d+$/.test(url.hostname);
+    const secure = url.protocol === "https:" || (url.protocol === "http:" && loopback);
+    if (!secure || url.username || url.password || url.pathname !== "/" || url.search || url.hash) {
+      throw new Error("Operation endpoint must be an HTTPS or loopback HTTP origin.");
+    }
+    return url.origin;
+}
+
+async function invokeHTTP(origin: string, operation: string, input: Readonly<Record<string, unknown>>,
+  headers: Headers, credentials: RequestCredentials): Promise<unknown> {
+    if (!/^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$/.test(operation)) {
+      throw new Error("Invalid operation name.");
+    }
+    const body = JSON.stringify(input);
+    if (new TextEncoder().encode(body).byteLength > 4 << 20) throw new Error("Operation request is too large.");
+    const response = await fetch(`${origin}/${operation}`, {
+      method: "POST", headers, body, credentials, cache: "no-store",
+      redirect: "manual", signal: AbortSignal.timeout(30_000),
+    });
+    if (response.type === "opaqueredirect" || (response.status >= 300 && response.status < 400)) {
+      await response.body?.cancel();
+      throw new OperationError("redirect_not_allowed", response.status);
+    }
+    const reader = response.body?.getReader();
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    if (reader) {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > 1 << 20) {
+          await reader.cancel();
+          throw new Error("Operation response is too large.");
+        }
+        chunks.push(value);
+      }
+    }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    let value: unknown;
+    try { value = JSON.parse(new TextDecoder().decode(bytes)); }
+    catch { throw new OperationError("invalid_response", response.status); }
+    if (!response.ok) {
+      const code = typeof value === "object" && value !== null && "error" in value ? value.error : undefined;
+      throw new OperationError(typeof code === "string" && /^[a-z_]+$/.test(code) ? code : "operation_failed", response.status);
+    }
+    return value;
 }
