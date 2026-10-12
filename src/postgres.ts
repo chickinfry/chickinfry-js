@@ -1,6 +1,9 @@
 import pg from "pg";
 import type { DatabasePort } from "./orm.js";
 
+/** The cleanup port's connection wait is part of the same budget that aborts the whole cleanup task. */
+export const cleanupBudgetMillis = 5_000;
+
 export interface PostgresPort extends DatabasePort {
   close(): Promise<void>;
 }
@@ -15,7 +18,7 @@ export function createPostgresPort(connectionString: string, signal?: AbortSigna
   if (!url.port) url.port = "5432";
   url.searchParams.set("options", `${url.searchParams.get("options") ?? ""} -c datestyle=ISO`);
   const pool = new pg.Pool({ connectionString: url.toString(),
-    ...(signal ? {connectionTimeoutMillis: 1_000} : {}), types: {
+    ...(signal ? {connectionTimeoutMillis: cleanupBudgetMillis} : {}), types: {
     getTypeParser: (oid, format) => {
       if (format !== "binary" && (oid === 1082 || oid === 1184)) return (value: string) => value;
       return pg.types.getTypeParser(oid, format);

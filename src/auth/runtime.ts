@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { cleanupBudgetMillis } from "../postgres.js";
 import { and, or, createDatabase, type Database, type DatabasePort, type AppAuthUsersRow, type AppAuthInvitesRow } from "./private/database.js";
 import { encodeTimestampValue } from "../orm.js";
 import { hashPassword, verifyPassword, randomToken, hashToken } from "./crypto.js";
@@ -345,7 +346,7 @@ export class Auth {
     const work = Promise.resolve().then(async () => {
       if (!accepted) return;
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5_000);
+      const timeout = setTimeout(() => controller.abort(), cleanupBudgetMillis);
       let port: ReturnType<AuthCleanupContext["createPort"]> | undefined;
       try {
         port = context.createPort(controller.signal);

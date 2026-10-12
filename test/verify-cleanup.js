@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import net from "node:net";
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { Auth, AuthError } from "../dist/auth/runtime.js";
 import { hashToken } from "../dist/auth/crypto.js";
 import { createDatabase } from "../dist/auth/private/database.js";
-import { createPostgresPort } from "../dist/postgres.js";
+import { createPostgresPort, cleanupBudgetMillis } from "../dist/postgres.js";
 
 const url = process.env.CHIK_TEST_DATABASE_URL;
 const port = createPostgresPort(url), other = createPostgresPort(url);
@@ -34,6 +35,35 @@ const context = (before, after) => ({
 const drain = async () => { await Promise.all(tasks.splice(0)); };
 const logs = [], originalLog = console.error;
 console.error = (...args) => logs.push(args);
+// 각 방향의 첫 데이터만 지연하는 TCP 프록시: 연결 수립만 늦추고 이후 쿼리는 그대로 둡니다.
+const delayProxy = perDirectionMillis => new Promise(resolve => {
+  const target = new URL(url);
+  const sockets = new Set();
+  const server = net.createServer(client => {
+    const upstream = net.connect({host: target.hostname, port: Number(target.port)});
+    for (const [from, to] of [[client, upstream], [upstream, client]]) {
+      let opened = false, queued = [], timer;
+      const flush = () => { opened = true; for (const chunk of queued.splice(0)) if (!to.destroyed) to.write(chunk); };
+      from.on("data", chunk => {
+        if (opened) { if (!to.destroyed) to.write(chunk); return; }
+        queued.push(chunk);
+        if (!timer) timer = setTimeout(flush, perDirectionMillis);
+      });
+      from.on("close", () => to.destroy());
+    }
+    for (const socket of [client, upstream]) { sockets.add(socket); socket.on("close", () => sockets.delete(socket)); }
+  });
+  server.on("error", () => {});
+  server.listen(0, "127.0.0.1", () => {
+    const proxied = new URL(url);
+    proxied.port = String(server.address().port);
+    resolve({url: proxied.toString(), async close() {
+      for (const socket of sockets) socket.destroy();
+      await new Promise(done => server.close(() => done()));
+    }});
+  });
+});
+const through = target => ({waitUntil(work) { tasks.push(work); }, createPort(signal) { return createPostgresPort(target, signal); }});
 
 try {
   const auth = new Auth(port, [], now);
@@ -193,8 +223,41 @@ try {
     assert.equal((await auth.session(unaffected.accessToken)).id, unaffected.userId);
     console.log(JSON.stringify({risk: "locked-cleanup-deadline", deadlineMillis: +deadlineMillis.toFixed(1)}));
   } finally { unlock.resolve(); await lock; }
+
+  // 연결 수립이 예전 1초 상한을 넘어도 정리 예산 안에 들면 정리가 완료되고, 예산을 넘는 지연은 여전히 실패로 기록됩니다.
+  const expiredPair = async () => {
+    const session = await db.appAuthSessions.insert({userId: owner.userId, tokenHash: hashToken(randomUUID()), userSessionVersion: 0, expiresAt: "2002-01-01T00:00:00.000Z"});
+    const refresh = await db.appAuthRefreshTokens.insert({sessionId: session.id, tokenHash: hashToken(randomUUID()), expiresAt: "2002-01-01T00:00:00.000Z"});
+    return {session, refresh};
+  };
+  const slow = await delayProxy(600);
+  const slowRows = await expiredPair();
+  const warnings = logs.length;
+  const slowStart = performance.now();
+  await new Auth(port, [], now, {}, {}, through(slow.url)).signin(email, password);
+  await drain();
+  const slowMillis = performance.now() - slowStart;
+  assert.ok(!await db.appAuthRefreshTokens.findById({id: slowRows.refresh.id}), "느린 연결로 만료 자료가 남으면 안 됩니다");
+  assert.ok(!await db.appAuthSessions.findById({id: slowRows.session.id}));
+  assert.equal(logs.length, warnings);
+  assert.ok(slowMillis > 1_000 && slowMillis < cleanupBudgetMillis, "연결 수립은 이전 상한을 넘고 전체 예산 안에 끝나야 합니다");
+  console.log(JSON.stringify({risk: "slow-connect-cleanup", slowMillis: +slowMillis.toFixed(1)}));
+  await slow.close();
+
+  const stuck = await delayProxy(3_000);
+  const stuckRows = await expiredPair();
+  const stuckStart = performance.now();
+  await new Auth(port, [], now, {}, {}, through(stuck.url)).signin(email, password);
+  await drain();
+  const stuckMillis = performance.now() - stuckStart;
+  assert.ok(await db.appAuthRefreshTokens.findById({id: stuckRows.refresh.id}), "예산을 넘는 지연은 만료 자료를 남겨야 합니다");
+  assert.ok(stuckMillis >= cleanupBudgetMillis - 100 && stuckMillis < 8_000);
+  assert.deepEqual(logs.at(-1), ["Authentication cleanup failed (refresh)."]);
+  assert.equal(logs.length, warnings + 1);
+  console.log(JSON.stringify({risk: "over-budget-connect", stuckMillis: +stuckMillis.toFixed(1)}));
+  await stuck.close();
   assert.ok(logs.flat().every(value => !String(value).includes("private")));
-  console.log("Authentication cleanup: detached response, bounded backlog, both parent-lock orders, consumed refresh retention, no-context expiry, rejected scheduling, port failures and deadline rollback passed.");
+  console.log("Authentication cleanup: detached response, bounded backlog, both parent-lock orders, consumed refresh retention, no-context expiry, rejected scheduling, port failures, deadline rollback and connection-budget alignment passed.");
 } finally {
   await drain();
   console.error = originalLog;
