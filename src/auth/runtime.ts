@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import { cleanupBudgetMillis } from "../postgres.js";
-import { and, or, createDatabase, type Database, type DatabasePort, type AppAuthUsersRow, type AppAuthInvitesRow } from "./private/database.js";
+import { and, or, createDatabase, type Database, type DatabasePort, type AppAuthUsersRow, type AppAuthInvitesRow, type AppAuthSessionsRow } from "./private/database.js";
 import { encodeTimestampValue } from "../orm.js";
 import { hashPassword, verifyPassword, randomToken, hashToken } from "./crypto.js";
 
@@ -312,6 +312,17 @@ export class Auth {
     validateToken(accessToken);
     const session = (await this.db.appAuthSessions.findMany({where: c => c.tokenHash.equals(hashToken(accessToken)), limit: 1}))[0];
     if (session && session.transport !== transport) throw new AuthError(transport === "browser" ? "invalid_input" : "invalid_token", transport === "browser" ? 400 : 401);
+    return this.validateSession(session);
+  }
+
+  /** Revalidates an already authenticated native connection; session IDs cannot establish a login. */
+  async revalidateSession(sessionId: string, userId: string): Promise<{ id: string; email: string; sessionId: string; expiresAt: string }> {
+    const session = await this.db.appAuthSessions.findById({id: sessionId});
+    if (session?.userId !== userId || session.transport !== "native") throw new AuthError("invalid_token", 401);
+    return this.validateSession(session);
+  }
+
+  private async validateSession(session: AppAuthSessionsRow | undefined): Promise<{ id: string; email: string; sessionId: string; expiresAt: string }> {
     if (!session || session.revokedAt !== null ||
         !Number.isFinite(Date.parse(session.expiresAt)) || Date.parse(session.expiresAt) <= this.now()) {
       throw new AuthError("invalid_token", 401);
