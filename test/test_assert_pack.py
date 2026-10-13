@@ -1,3 +1,4 @@
+import contextlib
 import io
 import json
 import os
@@ -7,6 +8,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "assert_pack.py"
@@ -114,6 +116,106 @@ class PackAssertionTest(unittest.TestCase):
         lines = inline.splitlines(keepends=True)
         self.assertTrue(all(line.startswith("          ") for line in lines))
         self.assertEqual("".join(line[10:] for line in lines), SCRIPT.read_text())
+
+
+@unittest.skipUnless(os.environ.get("PUBLISH_WORKFLOW_PATH"), "Workflow patch is delivered separately.")
+class ReleaseSourceTest(unittest.TestCase):
+    def setUp(self):
+        self.sha = "a" * 40
+        self.environment = {
+            "GITHUB_REPOSITORY": "example/package",
+            "GITHUB_SHA": self.sha,
+            "GITHUB_REF": "refs/tags/v0.3.0",
+            "GITHUB_EVENT_NAME": "push",
+            "GH_TOKEN": "fixture-token",
+        }
+        self.run = {
+            "head_sha": self.sha, "head_branch": "main", "event": "push",
+            "status": "completed", "conclusion": "success",
+        }
+        workflow = Path(os.environ["PUBLISH_WORKFLOW_PATH"]).read_text()
+        sources = []
+        for job in ("build", "publish"):
+            body = workflow.split("\n  " + job + ":\n", 1)[1].split("\n  publish:\n", 1)[0]
+            steps = body.split("    steps:\n", 1)[1]
+            self.assertTrue(steps.startswith("      - name: Verify release source before running code\n"))
+            first = steps.split("\n      - ", 1)[0]
+            self.assertIn(' /usr/bin/python3 -I -B - <<\'TRUST\'\n', first)
+            self.assertIn('/usr/bin/env -i GH_TOKEN="$GH_TOKEN"', first)
+            inline = first.split("<<'TRUST'\n", 1)[1].split("          TRUST", 1)[0]
+            self.assertTrue(all(not line or line.startswith("          ") for line in inline.splitlines()))
+            sources.append("\n".join(line[10:] for line in inline.splitlines()) + "\n")
+        self.assertEqual(sources[0], sources[1])
+        self.source = compile(sources[0], str(os.environ["PUBLISH_WORKFLOW_PATH"]), "exec")
+
+    def approval(self, status="behind", runs=None, error=None):
+        responses = iter(({"status": status}, {"workflow_runs": [self.run] if runs is None else runs}))
+        requests = []
+
+        def open_api(request, timeout):
+            requests.append(request.full_url)
+            self.assertEqual(request.get_header("Authorization"), "Bearer fixture-token")
+            self.assertEqual(timeout, 30)
+            if error:
+                raise error
+            return io.BytesIO(json.dumps(next(responses)).encode())
+
+        with mock.patch.dict(os.environ, self.environment, clear=True), \
+                mock.patch("urllib.request.build_opener") as opener, \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            opener.return_value.open.side_effect = open_api
+            try:
+                exec(self.source, {})
+            except SystemExit as error:
+                self.assertEqual(error.code, 1)
+                return False, requests
+        self.assertEqual(requests, [
+            "https://api.github.com/repos/example/package/compare/main..." + self.sha,
+            "https://api.github.com/repos/example/package/actions/workflows/ci.yml/runs?head_sha="
+            + self.sha + "&event=push&per_page=100",
+        ])
+        return True, requests
+
+    def test_main_ancestor_with_successful_ci(self):
+        for status in ("behind", "identical"):
+            with self.subTest(status=status):
+                self.assertTrue(self.approval(status)[0])
+
+    def test_non_ancestor_is_rejected(self):
+        for status in ("ahead", "diverged", "unknown"):
+            with self.subTest(status=status):
+                accepted, requests = self.approval(status)
+                self.assertFalse(accepted)
+                self.assertEqual(len(requests), 1)
+
+    def test_missing_unsuccessful_or_unfinished_ci_is_rejected(self):
+        for runs in ([], [dict(self.run, conclusion="failure")],
+                     [dict(self.run, status="in_progress", conclusion=None)],
+                     [dict(self.run, status="queued", conclusion=None)]):
+            with self.subTest(runs=runs):
+                self.assertFalse(self.approval(runs=runs)[0])
+
+    def test_unrelated_ci_is_rejected(self):
+        for field, value in (("head_sha", "b" * 40), ("head_branch", "feature"), ("event", "pull_request")):
+            with self.subTest(field=field):
+                self.assertFalse(self.approval(runs=[dict(self.run, **{field: value})])[0])
+
+    def test_invalid_source_is_rejected_before_api_access(self):
+        for field, value in (("GITHUB_REF", "refs/heads/main"), ("GITHUB_REF", "refs/tags/release"),
+                             ("GITHUB_EVENT_NAME", "workflow_dispatch"), ("GITHUB_SHA", "invalid"),
+                             ("GITHUB_REPOSITORY", "example/../package")):
+            with self.subTest(field=field, value=value):
+                with mock.patch.dict(self.environment, {field: value}):
+                    accepted, requests = self.approval()
+                self.assertFalse(accepted)
+                self.assertEqual(requests, [])
+
+    def test_api_errors_are_rejected_without_retry(self):
+        for error in (OSError("Unavailable API"), ValueError("Malformed API response")):
+            with self.subTest(error=error):
+                accepted, requests = self.approval(error=error)
+                self.assertFalse(accepted)
+                self.assertEqual(len(requests), 1)
 
 
 if __name__ == "__main__":
