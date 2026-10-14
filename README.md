@@ -37,6 +37,22 @@ local development. Authenticated operations use
   refresh, and the type-safe ORM core.
 - `@chickinfry/chickinfry-js/auth`: authentication runtime for generated servers.
 - `@chickinfry/chickinfry-js/postgres`: PostgreSQL adapter for generated repositories.
+- `@chickinfry/chickinfry-js/logging`: server console redaction with a secret snapshot.
+
+The logging entry point guards the server's global console when imported. Run
+server work inside `runWithLogRedaction({values, databaseURL}, work)`; asynchronous
+descendants retain that snapshot. Logs outside a snapshot are discarded and
+counted. Console arguments become one safe string; format placeholders remain
+literal, getters and custom inspectors are not called, and logging failures do
+not change the work result. The root client entry point does not change console.
+Direct output streams and exception records collected by the execution host are
+separate paths and are not covered by console redaction. Console message
+arguments are masked, but metadata that the execution host attaches to console
+records, such as function names in call stacks, is a separate path and is not
+masked. Matching is per record: secret fragments split across separate log
+calls are not recombined, so reassembling them across records is not protected.
+Only exact bound values and database URL/password percent escapes are matched,
+not arbitrary encodings or credentials issued during a request.
 
 ## License
 
