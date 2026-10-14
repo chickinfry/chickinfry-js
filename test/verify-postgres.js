@@ -50,7 +50,7 @@ test("Workers cancellation settles before connect and after close without uncaug
     if (scenario === "pre-aborted") {
       const base = "postgresql://fixture:fixture@database.example.test/customer?sslmode=verify-full";
       assert.throws(() => createPostgresPort(base+"&channel_binding=require"), {
-        message:"Cloudflare Workers runtime does not support PostgreSQL channel binding. Remove channel_binding=require and register again; connections use sslmode=verify-full.",
+        message:"The deployment runtime does not support PostgreSQL channel binding. Remove channel_binding=require and run chik update database (or chik add database for a new project); connections use sslmode=verify-full.",
       });
       for (const binding of ["prefer", "disable"]) await createPostgresPort(base+"&channel_binding="+binding).close();
     }
