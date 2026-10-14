@@ -3,6 +3,7 @@ import { test } from "node:test";
 import dns from "node:dns";
 import net from "node:net";
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import pg from "pg";
 import { createPostgresPort, cleanupBudgetMillis } from "../dist/postgres.js";
 import { Auth } from "../dist/auth/runtime.js";
@@ -49,7 +50,7 @@ test("Workers cancellation settles before connect and after close without uncaug
     if (scenario === "pre-aborted") {
       const base = "postgresql://fixture:fixture@database.example.test/customer?sslmode=verify-full";
       assert.throws(() => createPostgresPort(base+"&channel_binding=require"), {
-        message:"channel_binding=require is not supported in this runtime. Use prefer or disable only if your security policy allows it.",
+        message:"Cloudflare Workers runtime does not support PostgreSQL channel binding. Remove channel_binding=require and register again; connections use sslmode=verify-full.",
       });
       for (const binding of ["prefer", "disable"]) await createPostgresPort(base+"&channel_binding="+binding).close();
     }
@@ -203,21 +204,58 @@ test("revalidation retains native identity and checks revoked, expired, disabled
   await assert.rejects(auth.revalidateSession(sessionId, userId), {code:"invalid_token"});
 });
 
+test("shared URL corpus preserves host, port, database and case-insensitive schemes", async t => {
+  const cases = JSON.parse(readFileSync(process.env.CHIK_POSTGRES_URL_CORPUS ??
+    new URL("../.ci-work/cli/adapters/database/postgresql/testdata/urls.json",import.meta.url),"utf8"));
+  const Client = pg.Client;
+  let target;
+  t.mock.method(pg,"Client",function (config) {
+    target = {host:config.host,port:config.port,database:config.database};
+    return new Client(config);
+  });
+  for (const c of cases.filter(c => /^(?:host-|scheme-)/.test(c.name))) {
+    if (!c.valid) {
+      assert.throws(() => createPostgresPort(c.url),{message:c.error ?? "A complete, permitted PostgreSQL URL is required."},c.name);
+      continue;
+    }
+    const port = createPostgresPort(c.url);
+    assert.deepEqual(target,c.target,c.name);
+    await port.close();
+  }
+});
+
 test("URL overrides, private destinations and IPv6 fail before a connection", () => {
   for (const host of ["127.0.0.1", "2130706433", "0x7f000001", "10.0.0.1", "100.64.0.1", "169.254.169.254",
     "[::1]", "[::ffff:127.0.0.1]", "[fc00::1]", "[2001:db8::1]", "localhost", "database.internal", "private.local"]) {
     assert.throws(() => createPostgresPort(localURL.replace("127.0.0.1", host), undefined, true),
-      {message: "A complete, permitted PostgreSQL URL is required."});
+      {message: /^(?:2130706433|0x7f000001)$/.test(host)
+        ? "Unsupported PostgreSQL host. Use an ASCII hostname, a standard dotted-decimal IPv4 address, or a bracketed IPv6 address."
+        : "A complete, permitted PostgreSQL URL is required."});
+  }
+  for (const path of ["/wrong/../target", "/wrong/%2e%2e/target", "/wrong/.%2E/target", "/./target"]) {
+    assert.throws(() => createPostgresPort(localURL.replace("/customer?",path+"?")),
+      {message:"A complete, permitted PostgreSQL URL is required."});
+  }
+  for (const host of ["db.test,other.test", "db%2etest", "db%25test"]) {
+    assert.throws(() => createPostgresPort(localURL.replace("127.0.0.1",host)),
+      {message:"Unsupported PostgreSQL host. Use an ASCII hostname, a standard dotted-decimal IPv4 address, or a bracketed IPv6 address."});
   }
   for (const query of ["host=127.0.0.1", "port=5432", "user=owner", "password=private", "sslcert=/tmp/key",
     "sslrootcert=/tmp/ca", "options=-c+search_path=public", "sslmode=require&sslmode=disable", "sslmode=invalid"]) {
     const name = new URLSearchParams(query).keys().next().value;
     assert.throws(() => createPostgresPort(localURL.replace("sslmode=disable", query)),
-      {message:name === "sslmode" ? "A complete, permitted PostgreSQL URL is required." : `Unsupported PostgreSQL connection option "${name}".`});
+      {message:name === "sslmode" ? "A complete, permitted PostgreSQL URL is required." : "Unsupported PostgreSQL connection option. Only sslmode and channel_binding are allowed."});
+  }
+  for (const key of ["disposable", "%64isposable"]) {
+    assert.throws(() => createPostgresPort(localURL+"&"+key+"=ignored"), error => {
+      assert.equal(error.message, "Unsupported PostgreSQL connection option. Only sslmode and channel_binding are allowed.");
+      assert.doesNotMatch(error.message, /disposable/);
+      return true;
+    });
   }
   assert.throws(() => createPostgresPort(localURL+"&channel_binding=unknown"), {message:'Invalid PostgreSQL connection option "channel_binding".'});
   assert.throws(() => createPostgresPort(localURL+"&channel_binding=require&channel_binding=disable"), {message:'Invalid PostgreSQL connection option "channel_binding".'});
-  assert.throws(() => createPostgresPort(localURL+"&https%3A%2F%2Fprivate=ignored"), {message:"Unsupported PostgreSQL connection option name."});
+  assert.throws(() => createPostgresPort(localURL+"&https%3A%2F%2Fprivate=ignored"), {message:"Unsupported PostgreSQL connection option. Only sslmode and channel_binding are allowed."});
 });
 
 test("Neon default and pooled URL options preserve channel binding without exposing credentials", async () => {

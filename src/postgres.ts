@@ -27,14 +27,22 @@ export function createPostgresPort(connectionString: string, signal?: AbortSigna
   let requireChannelBinding = false;
   let invalidMessage = "A complete, permitted PostgreSQL URL is required.";
   try {
+    const path = connectionString.match(/^postgres(?:ql)?:\/\/[^/?#]+(\/[^?#]*)/i)?.[1];
+    if (!path || path.split("/").some(segment => /^(?:\.|%2e){1,2}$/i.test(segment))) throw new Error();
     const url = new URL(connectionString);
+    const hostname = url.hostname;
+    if (hostname.startsWith("[") ? isIP(hostname.slice(1,-1)) !== 6 :
+        !/^(?:[a-z0-9_-]+\.)*[a-z0-9_-]+\.?$/i.test(hostname) ||
+        /(?:^|\.)(?:[0-9]+|0x[0-9a-f]*)\.?$/i.test(hostname) && isIP(hostname) !== 4) {
+      invalidMessage = "Unsupported PostgreSQL host. Use an ASCII hostname, a standard dotted-decimal IPv4 address, or a bracketed IPv6 address.";
+      throw new Error();
+    }
     if (!["postgres:","postgresql:"].includes(url.protocol) || !url.hostname || !url.username || !url.password ||
         !url.pathname || url.pathname === "/" || url.hash) throw new Error();
     const options = [...url.searchParams];
     for (const [name, value] of options) {
       if (!["sslmode", "channel_binding"].includes(name)) {
-        invalidMessage = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(name)
-          ? `Unsupported PostgreSQL connection option "${name}".` : "Unsupported PostgreSQL connection option name.";
+        invalidMessage = "Unsupported PostgreSQL connection option. Only sslmode and channel_binding are allowed.";
         throw new Error();
       }
       const values = name === "sslmode" ? ["disable","prefer","require","verify-ca","verify-full","no-verify"] : ["require","prefer","disable"];
@@ -43,7 +51,7 @@ export function createPostgresPort(connectionString: string, signal?: AbortSigna
         throw new Error();
       }
     }
-    const host = new URL(`http://${url.hostname}`).hostname.toLowerCase().replace(/\.$/, "").replace(/^\[|\]$/g, "");
+    const host = hostname.toLowerCase().replace(/\.$/, "").replace(/^\[|\]$/g, "");
     const port = Number(url.port || 5432);
     const database = decodeURIComponent(url.pathname.slice(1)), user = decodeURIComponent(url.username), password = decodeURIComponent(url.password);
     if (!Number.isSafeInteger(port) || port < 1 || port > 65535 ||
@@ -58,7 +66,7 @@ export function createPostgresPort(connectionString: string, signal?: AbortSigna
     requireChannelBinding = binding === "require";
     if (requireChannelBinding && (cloudflare || !mode || mode === "disable")) {
       invalidMessage = cloudflare
-        ? "channel_binding=require is not supported in this runtime. Use prefer or disable only if your security policy allows it."
+        ? "Cloudflare Workers runtime does not support PostgreSQL channel binding. Remove channel_binding=require and register again; connections use sslmode=verify-full."
         : "channel_binding=require needs TLS. Use sslmode=verify-full.";
       throw new Error();
     }
