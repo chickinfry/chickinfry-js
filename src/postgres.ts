@@ -174,6 +174,7 @@ export function createPostgresPort(connectionString: string, signal?: AbortSigna
     query: (sql, parameters) => run(async () => (await client.query(sql, parameters as unknown[])).rows),
     transaction: <T>(work: (tx: DatabasePort) => Promise<T>) => run(async () => {
       let active = true, begun = false, committing = false;
+      let value: T, commit: pg.QueryResult;
       try {
         await client.query("begin");
         begun = true;
@@ -185,12 +186,11 @@ export function createPostgresPort(connectionString: string, signal?: AbortSigna
           },
           transaction() { throw new Error("Nested transactions are not supported."); },
         };
-        const value = await work(tx);
+        value = await work(tx);
         signal?.throwIfAborted();
         active = false;
         committing = true;
-        await client.query("commit");
-        return value;
+        commit = await client.query("commit");
       } catch (error) {
         active = false;
         if (committing) {
@@ -204,6 +204,9 @@ export function createPostgresPort(connectionString: string, signal?: AbortSigna
         } else { closed = true; await end().catch(() => {}); }
         throw error;
       } finally { active = false; }
+      // A completed COMMIT can report ROLLBACK; the server has already ended the transaction.
+      if (commit.command !== "COMMIT") throw new Error("Transaction commit failed.");
+      return value;
     }),
     close() {
       closed = true;

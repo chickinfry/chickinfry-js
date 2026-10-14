@@ -389,7 +389,7 @@ test("one lazy connection serializes queries around a transaction and closes onc
   let connects = 0, closes = 0;
   const queries = [];
   t.mock.method(pg.Client.prototype, "connect", function (callback) { connects++; callback(); });
-  t.mock.method(pg.Client.prototype, "query", async sql => { queries.push(sql); return {rows: [{id: 1}]}; });
+  t.mock.method(pg.Client.prototype, "query", async sql => { queries.push(sql); return {command: sql.toUpperCase(), rows: [{id: 1}]}; });
   t.mock.method(pg.Client.prototype, "end", async () => { closes++; });
   const port = createPostgresPort(localURL);
   assert.equal(connects, 0);
@@ -402,6 +402,27 @@ test("one lazy connection serializes queries around a transaction and closes onc
   await Promise.all([port.close(), port.close()]);
   assert.equal(closes, 1);
   await assert.rejects(port.query("late", []), /closed/);
+});
+
+test("a failed commit query keeps its unknown outcome and closes the connection", async t => {
+  const cause = new Error("Connection lost during commit.");
+  let closes = 0;
+  t.mock.method(pg.Client.prototype, "connect", callback => callback());
+  t.mock.method(pg.Client.prototype, "query", async sql => {
+    if (sql === "commit") throw cause;
+    return {rows: []};
+  });
+  t.mock.method(pg.Client.prototype, "end", async () => { closes++; });
+  const port = createPostgresPort(localURL);
+  try {
+    await assert.rejects(port.transaction(async () => "ok"), error => {
+      assert.equal(error.message, "Transaction commit outcome is unknown.");
+      assert.equal(error.cause, cause);
+      return true;
+    });
+    await assert.rejects(port.query("select 1", []), /closed/);
+  } finally { await port.close(); }
+  assert.equal(closes, 1);
 });
 
 test("a failed connect cannot allocate a replacement connection", async t => {
@@ -462,6 +483,30 @@ test("PostgreSQL uses one backend across concurrent ORM queries and transaction 
     }), {code: "22012"});
     await assert.rejects(expired.query("select 1", []), /no longer active/);
     assert.equal((await port.query("select pg_backend_pid() as pid", []))[0].pid, pid);
+  } finally { await port.close(); }
+});
+
+test("PostgreSQL rejects a rolled-back commit and still commits a healthy transaction", {
+  skip: !process.env.CHIK_TEST_DATABASE_URL,
+}, async () => {
+  const port = createPostgresPort(process.env.CHIK_TEST_DATABASE_URL);
+  try {
+    await port.query("create temporary table commit_check (id integer primary key)", []);
+    await assert.rejects(port.transaction(async tx => {
+      await tx.query("insert into commit_check values (1)", []);
+      await assert.rejects(tx.query("insert into commit_check values (1)", []), {code: "23505"});
+      return "ok";
+    }), error => {
+      assert.equal(error.message, "Transaction commit failed.");
+      assert.equal(error.code, undefined);
+      return true;
+    });
+    assert.deepEqual(await port.query("select id from commit_check", []), []);
+    assert.equal(await port.transaction(async tx => {
+      await tx.query("insert into commit_check values (2)", []);
+      return "ok";
+    }), "ok");
+    assert.deepEqual(await port.query("select id from commit_check", []), [{id: 2}]);
   } finally { await port.close(); }
 });
 
