@@ -19,6 +19,26 @@ async function within(work, milliseconds) {
   } finally { clearTimeout(timer); }
 }
 
+// The corpus lives in the CLI repo. It reaches us either through the JS CI
+// layout (CLI pinned under .ci-work/cli, see cli-generator.ref) or through
+// the CLI repo's own CI, which nests this checkout and keeps the corpus at
+// its workspace root.
+function postgresUrlCorpus() {
+  const relative = "adapters/database/postgresql/testdata/urls.json";
+  for (let dir = new URL("..", import.meta.url); ; dir = new URL("../", dir)) {
+    for (const candidate of [new URL(`.ci-work/cli/${relative}`, dir), new URL(relative, dir)]) {
+      if (existsSync(candidate)) return candidate;
+    }
+    if (dir.pathname === "/") break;
+  }
+  return null;
+}
+
+// The publish job has no CLI checkout, so the corpus test skips there; CI sets
+// CHIK_REQUIRE_URL_CORPUS=1 so a missing corpus fails instead of skipping.
+const urlCorpus = process.env.CHIK_POSTGRES_URL_CORPUS ?? postgresUrlCorpus();
+const urlCorpusRequired = process.env.CHIK_REQUIRE_URL_CORPUS === "1";
+
 test("Workers cancellation settles before connect and after close without uncaught exceptions", async t => {
   const fixture = `
     import assert from "node:assert/strict";
@@ -50,7 +70,7 @@ test("Workers cancellation settles before connect and after close without uncaug
     if (scenario === "pre-aborted") {
       const base = "postgresql://fixture:fixture@database.example.test/customer?sslmode=verify-full";
       assert.throws(() => createPostgresPort(base+"&channel_binding=require"), {
-        message:"Cloudflare Workers runtime does not support PostgreSQL channel binding. Remove channel_binding=require and register again; connections use sslmode=verify-full.",
+        message:"The deployment runtime does not support PostgreSQL channel binding. Remove channel_binding=require and run chik update database (or chik add database for a new project); connections use sslmode=verify-full.",
       });
       for (const binding of ["prefer", "disable"]) await createPostgresPort(base+"&channel_binding="+binding).close();
     }
@@ -185,7 +205,8 @@ test("startup abort and driver connect timeout settle in both timer orders", asy
 test("revalidation retains native identity and checks revoked, expired, disabled and browser sessions", async () => {
   const sessionId = "22222222-2222-4222-8222-222222222222", userId = "11111111-1111-4111-8111-111111111111";
   const session = {id:sessionId, user_id:userId, token_hash:"a".repeat(64), transport:"native", user_session_version:1,
-    created_at:"2029-01-01T00:00:00Z", expires_at:"2029-01-02T00:00:00Z", revoked_at:null};
+    created_at:"2029-01-01T00:00:00Z", expires_at:"2029-01-02T00:00:00Z", revoked_at:null,
+    first_login_at:null, last_renewed_at:null};
   const user = {id:userId, email:"fixture@example.test", session_version:1, created_at:"2029-01-01T00:00:00Z",
     disabled_at:null, password_hash:null};
   const auth = new Auth({async query(sql) { return [sql.includes('"app_auth_sessions"') ? session : user]; },
@@ -203,12 +224,6 @@ test("revalidation retains native identity and checks revoked, expired, disabled
   user.disabled_at = session.created_at;
   await assert.rejects(auth.revalidateSession(sessionId, userId), {code:"invalid_token"});
 });
-
-// The publish job has no CLI checkout, so the corpus test skips there; CI sets
-// CHIK_REQUIRE_URL_CORPUS=1 so a missing corpus fails instead of skipping.
-const urlCorpusDefault = new URL("../.ci-work/cli/adapters/database/postgresql/testdata/urls.json",import.meta.url);
-const urlCorpus = process.env.CHIK_POSTGRES_URL_CORPUS ?? (existsSync(urlCorpusDefault) ? urlCorpusDefault : null);
-const urlCorpusRequired = process.env.CHIK_REQUIRE_URL_CORPUS === "1";
 
 test("shared URL corpus preserves host, port, database and case-insensitive schemes", {
   skip: !urlCorpus && !urlCorpusRequired && "the CLI URL corpus is not checked out",

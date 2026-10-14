@@ -66,7 +66,7 @@ export function createPostgresPort(connectionString: string, signal?: AbortSigna
     requireChannelBinding = binding === "require";
     if (requireChannelBinding && (cloudflare || !mode || mode === "disable")) {
       invalidMessage = cloudflare
-        ? "Cloudflare Workers runtime does not support PostgreSQL channel binding. Remove channel_binding=require and register again; connections use sslmode=verify-full."
+        ? "The deployment runtime does not support PostgreSQL channel binding. Remove channel_binding=require and run chik update database (or chik add database for a new project); connections use sslmode=verify-full."
         : "channel_binding=require needs TLS. Use sslmode=verify-full.";
       throw new Error();
     }
