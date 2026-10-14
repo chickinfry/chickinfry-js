@@ -114,7 +114,7 @@ try {
           current = {...initial, accessToken:"", refreshToken:""};
           return;
         }
-        // 저장소 정리에 실패해도 소비 여부가 불명인 자격을 다시 보내지 않습니다.
+        // Even when storage cleanup fails, credentials with unknown consumption state are not sent again.
         throw new Error("Session storage unavailable.");
       },
     };
@@ -145,7 +145,7 @@ try {
     }
     assert.equal(attempts, 1, name);
     recover = true;
-    // 기존 명시적 호출로 복구하고 저장한 새 자격으로 일반 호출을 재개합니다.
+    // Recover via the existing explicit call, then resume normal calls with the newly stored credentials.
     const recovered = await first.invoke("auth.refresh", {refresh_token:initial.refreshToken}) as Record<string, string>;
     current = {...initial, accessToken:recovered.access_token, refreshToken:recovered.refresh_token};
     await second.invoke("catalog.create", {});

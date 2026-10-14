@@ -94,7 +94,7 @@ export class HTTP implements ClientTransport {
           if (shared && shared !== flight) return await shared;
           return await this.#refreshFailed(store, expected, expected.refreshToken, error, error === responseError);
         } finally {
-          // 소비 여부가 불명인 자격은 새 로그인이나 명시적 복구 전까지 다시 보내지 않습니다.
+          // Credentials with unknown consumption state are not sent again until a fresh sign-in or explicit recovery.
           if (this.refreshes.get(refreshToken) === flight) this.refreshes.delete(refreshToken);
         }
       });
@@ -183,7 +183,7 @@ export class BrowserHTTP implements ClientTransport {
 }
 
 function operationOrigin(origin: string): string {
-    // URL 파서가 비정규 IPv4를 정규화하기 전에 원문 호스트를 검사합니다.
+    // Check the raw host before the URL parser normalizes non-canonical IPv4.
     const host = /^[a-z][a-z\d+.-]*:\/\/(\[[^\]]+\]|[^:/\\?#@]+)(?::\d+)?(?:\/|$)/i.exec(origin)?.[1];
     const octets = host?.split(".");
     const loopback = host === "[::1]" || (octets?.length === 4 && octets[0] === "127" &&

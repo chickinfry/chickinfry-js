@@ -57,7 +57,7 @@ export interface AuthOptions {
   readonly projectId?: string;
 }
 
-/** 생성 서버의 실행 문맥이 정리 완료와 전용 포트 종료까지 소유합니다. */
+/** The generated server's runtime context owns cleanup completion and dedicated port shutdown. */
 export interface AuthCleanupContext {
   waitUntil(work: Promise<void>): void;
   createPort(signal: AbortSignal): DatabasePort & { close(): Promise<void> };
@@ -384,7 +384,7 @@ export class Auth {
 
   private scheduleCleanup(invitesOnly = false): void {
     const context = this.cleanupContext;
-    // 실행 소유자가 없으면 물리 정리만 생략하며 만료 판정은 각 인증 경로가 수행합니다.
+    // Without a runtime owner, only physical cleanup is skipped; expiry checks remain each auth path's responsibility.
     if (!context) return;
     let accepted = false;
     const work = Promise.resolve().then(async () => {
@@ -432,7 +432,7 @@ export class Auth {
         orderBy: c => [c.expiresAt.asc(), c.id.asc()], limit: cleanupLimit,
       });
       for (const candidate of sessions) await db.transaction(async tx => {
-        // refresh와 같은 순서로 부모를 잠근 뒤 자식을 확인합니다.
+        // Lock the parent in the same order as refresh, then check its children.
         const locked = await tx.appAuthSessions.updateIf({id: candidate.id},
           c => and(c.expiresAt.equals(candidate.expiresAt), c.expiresAt.lessThanOrEquals(cutoff)),
           {expiresAt: candidate.expiresAt});

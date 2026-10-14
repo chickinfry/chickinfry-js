@@ -35,7 +35,7 @@ const context = (before, after) => ({
 const drain = async () => { await Promise.all(tasks.splice(0)); };
 const logs = [], originalLog = console.error;
 console.error = (...args) => logs.push(args);
-// 각 방향의 첫 데이터만 지연하는 TCP 프록시: 연결 수립만 늦추고 이후 쿼리는 그대로 둡니다.
+// TCP proxy that delays only the first data chunk in each direction: slows connection setup, leaves later queries untouched.
 const delayProxy = perDirectionMillis => new Promise(resolve => {
   const target = new URL(url);
   const sockets = new Set();
@@ -99,31 +99,31 @@ try {
   const tokens = await new Auth(requestPort, [], now, {}, {}, delayed).signin(email, password);
   const responseMillis = performance.now() - begin;
   await started.promise;
-  assert.equal(rounds, 0, "정리를 막아도 인증 응답은 완료되어야 합니다");
+  assert.equal(rounds, 0, "authentication response must complete even while cleanup is blocked");
   await requestPort.close();
   const cleanupStart = performance.now();
   release.resolve();
   await drain();
   const cleanupMillis = performance.now() - cleanupStart;
   assert.equal(closes, 1);
-  assert.ok(rounds <= 22 && deleted <= 8, "한 번의 정리는 적체 전체를 처리하지 않습니다");
+  assert.ok(rounds <= 22 && deleted <= 8, "one cleanup pass must not process the entire backlog");
   assert.ok(cleanupMillis >= 1000 && responseMillis < cleanupMillis);
   assert.equal((await auth.session(tokens.accessToken)).id, owner.userId);
   assert.ok((await db.appAuthInvites.findMany({where: c => c.expiresAt.equals(expired)})).length > 0);
   console.log(JSON.stringify({risk: "backlog-delay", responseMillis: +responseMillis.toFixed(1), cleanupMillis: +cleanupMillis.toFixed(1), ormQueries: rounds, deleted}));
 
-  // 별도 보존·경합 검사가 앞선 인공 적체의 후보 순서에 가려지지 않게 제거합니다.
+  // Remove the earlier artificial backlog so separate retention and race checks are not obscured by its candidate ordering.
   for (const row of await db.appAuthRefreshTokens.findMany({where: c => c.expiresAt.equals(expired)})) await db.appAuthRefreshTokens.delete({id: row.id});
   for (const row of await db.appAuthSessions.findMany({where: c => c.expiresAt.equals(expired)})) await db.appAuthSessions.delete({id: row.id});
   for (const row of await db.appAuthRateLimits.findMany({where: c => c.expiresAt.equals(expired)})) await db.appAuthRateLimits.delete({action: row.action, keyHash: row.keyHash});
   for (const row of await db.appAuthInvites.findMany({where: c => c.expiresAt.equals(expired)})) await db.appAuthInvites.delete({id: row.id});
 
-  // 만료 access에 살아 있는 refresh가 있으면 부모 잠금을 획득한 순서와 무관하게 보존합니다.
+  // An expired access token paired with a live refresh token is preserved regardless of parent lock acquisition order.
   for (const refreshFirst of [true, false]) {
     const live = await auth.signin(email, password);
     const cutoff = new Date(clock - 1).toISOString();
     await db.appAuthSessions.update({id: live.sessionId}, {expiresAt: cutoff});
-    // 앞선 적체를 제거하지 않고 가장 오래된 부모 후보로 만듭니다.
+    // Make this the oldest parent candidate while keeping the earlier backlog in place.
     await db.appAuthSessions.update({id: live.sessionId}, {expiresAt: "2010-01-01T00:00:00.000Z"});
     const locked = Promise.withResolvers(), attempted = Promise.withResolvers();
     const winner = observe(port, undefined, async (sql, args, rows) => {
@@ -182,7 +182,7 @@ try {
   gate.resolve();
   await drain();
 
-  // 거부된 등록은 포트를 만들지 않으며 factory·close 실패도 커밋된 결과를 바꾸지 않습니다.
+  // A rejected signup creates no port, and factory or close failures never change the committed result.
   for (const failure of ["schedule", "create", "close"]) {
     let created = 0;
     const failing = {
@@ -200,7 +200,7 @@ try {
     assert.equal((await auth.session(result.accessToken)).id, result.userId);
   }
 
-  // 실제 DB 잠금 대기를 중단하고 미커밋 삭제가 남지 않는지 확인합니다.
+  // Verify that aborting a real DB lock wait leaves no uncommitted deletion behind.
   const blocked = await db.appAuthSessions.insert({userId: owner.userId, tokenHash: hashToken(randomUUID()), userSessionVersion: 0, expiresAt: "2000-01-01T00:00:00.000Z"});
   const holding = Promise.withResolvers(), unlock = Promise.withResolvers();
   const lock = other.transaction(async tx => {
@@ -224,7 +224,7 @@ try {
     console.log(JSON.stringify({risk: "locked-cleanup-deadline", deadlineMillis: +deadlineMillis.toFixed(1)}));
   } finally { unlock.resolve(); await lock; }
 
-  // 연결 수립이 예전 1초 상한을 넘어도 정리 예산 안에 들면 정리가 완료되고, 예산을 넘는 지연은 여전히 실패로 기록됩니다.
+  // Connection setup beyond the old 1s cap still completes cleanup when it fits the cleanup budget; longer delays are still recorded as failures.
   const expiredPair = async () => {
     const session = await db.appAuthSessions.insert({userId: owner.userId, tokenHash: hashToken(randomUUID()), userSessionVersion: 0, expiresAt: "2002-01-01T00:00:00.000Z"});
     const refresh = await db.appAuthRefreshTokens.insert({sessionId: session.id, tokenHash: hashToken(randomUUID()), expiresAt: "2002-01-01T00:00:00.000Z"});
@@ -237,10 +237,10 @@ try {
   await new Auth(port, [], now, {}, {}, through(slow.url)).signin(email, password);
   await drain();
   const slowMillis = performance.now() - slowStart;
-  assert.ok(!await db.appAuthRefreshTokens.findById({id: slowRows.refresh.id}), "느린 연결로 만료 자료가 남으면 안 됩니다");
+  assert.ok(!await db.appAuthRefreshTokens.findById({id: slowRows.refresh.id}), "a slow connection must not leave expired rows behind");
   assert.ok(!await db.appAuthSessions.findById({id: slowRows.session.id}));
   assert.equal(logs.length, warnings);
-  assert.ok(slowMillis > 1_000 && slowMillis < cleanupBudgetMillis, "연결 수립은 이전 상한을 넘고 전체 예산 안에 끝나야 합니다");
+  assert.ok(slowMillis > 1_000 && slowMillis < cleanupBudgetMillis, "connection setup must exceed the old cap yet finish within the overall budget");
   console.log(JSON.stringify({risk: "slow-connect-cleanup", slowMillis: +slowMillis.toFixed(1)}));
   await slow.close();
 
@@ -250,7 +250,7 @@ try {
   await new Auth(port, [], now, {}, {}, through(stuck.url)).signin(email, password);
   await drain();
   const stuckMillis = performance.now() - stuckStart;
-  assert.ok(await db.appAuthRefreshTokens.findById({id: stuckRows.refresh.id}), "예산을 넘는 지연은 만료 자료를 남겨야 합니다");
+  assert.ok(await db.appAuthRefreshTokens.findById({id: stuckRows.refresh.id}), "a delay beyond the budget must leave expired rows in place");
   assert.ok(stuckMillis >= cleanupBudgetMillis - 100 && stuckMillis < 8_000);
   assert.deepEqual(logs.at(-1), ["Authentication cleanup failed (refresh)."]);
   assert.equal(logs.length, warnings + 1);
