@@ -7,6 +7,12 @@ import sys
 import tarfile
 
 
+def is_realtime(path, is_directory=False):
+    parts = path.split("/")
+    basename = parts[-1] if is_directory else parts[-1].split(".", 1)[0]
+    return any(part.casefold() == "realtime" for part in (*parts[:-1], basename))
+
+
 def assert_pack(directory):
     tarballs = list(Path(directory).glob("*.tgz"))
     if len(tarballs) != 1:
@@ -24,6 +30,8 @@ def assert_pack(directory):
             if "\\" in name or any(part in ("", ".", "..") for part in name.split("/")):
                 raise ValueError("Noncanonical npm package path.")
             in_dist = name.startswith("package/dist/")
+            if in_dist and is_realtime(name, member.isdir()):
+                raise ValueError("Unexpected npm package entry.")
             if member.isdir():
                 if name not in ("package", "package/dist") and not in_dist:
                     raise ValueError("Unexpected npm package directory.")
@@ -36,9 +44,19 @@ def assert_pack(directory):
                 raise ValueError("Duplicate npm package file.")
             if name == "package/package.json":
                 manifest = json.load(archive.extractfile(member))
-                if (not isinstance(manifest, dict) or "tag" in manifest
+                if (not isinstance(manifest, dict)
+                        or manifest.keys() & {"tag", "main", "module", "browser", "typesVersions"}
                         or manifest.get("publishConfig") != {"access": "public"}):
                     raise ValueError("Unexpected npm publish configuration.")
+                exports = manifest.get("exports")
+                if (not isinstance(exports, dict)
+                        or not exports.keys() <= {".", "./auth", "./postgres", "./logging"}
+                        or any(not isinstance(target, str) or not target.startswith("./dist/")
+                               or not target.endswith(".js") or "\\" in target
+                               or is_realtime(target)
+                               or any(part in ("", ".", "..") for part in target.split("/")[1:])
+                               for target in exports.values())):
+                    raise ValueError("Unexpected npm package exports.")
             files.add(name)
     if "package/package.json" not in files:
         raise ValueError("Missing npm package.json.")

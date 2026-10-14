@@ -21,7 +21,8 @@ class PackAssertionTest(unittest.TestCase):
         self.directory = Path(temporary.name)
 
     def pack(self, entries, filename="fixture.tgz", manifest=None):
-        payload = json.dumps({"publishConfig": {"access": "public"}} if manifest is None else manifest).encode()
+        payload = json.dumps({"publishConfig": {"access": "public"}, "exports": {".": "./dist/index.js"}}
+                             if manifest is None else manifest).encode()
         with tarfile.open(self.directory / filename, "w:gz") as archive:
             for name, kind in entries:
                 member = tarfile.TarInfo(name)
@@ -51,16 +52,34 @@ class PackAssertionTest(unittest.TestCase):
         self.pack([(name, tarfile.REGTYPE) for name in ("package/package.json", "package/src/fixture.js")])
         self.assertNotEqual(self.check_pack().returncode, 0)
 
+    def test_realtime_entries_are_rejected(self):
+        for name, kind in (
+            ("package/dist/realtime/client.js", tarfile.REGTYPE),
+            ("package/dist/Realtime/x.js", tarfile.REGTYPE),
+            ("package/dist/realtime.js", tarfile.REGTYPE),
+            ("package/dist/realtime.d.ts", tarfile.REGTYPE),
+            ("package/dist/foo/realtime/x.js", tarfile.REGTYPE),
+            ("package/dist/foo/Realtime.mjs", tarfile.REGTYPE),
+            ("package/dist/realtime/", tarfile.DIRTYPE),
+            ("package/dist/foo/REALTIME/", tarfile.DIRTYPE),
+        ):
+            with self.subTest(name=name):
+                self.pack([("package/package.json", tarfile.REGTYPE), (name, kind)])
+                self.assertNotEqual(self.check_pack().returncode, 0)
+
     def test_missing_package_json(self):
         self.pack([("package/dist/index.js", tarfile.REGTYPE)])
         self.assertNotEqual(self.check_pack().returncode, 0)
 
     def test_publish_configuration_is_fixed(self):
         for manifest in (
-            {"publishConfig": {"access": "public", "registry": "https://example.invalid/"}},
-            {},
-            {"publishConfig": None},
-            {"publishConfig": {"access": "restricted"}},
+            {"exports": {".": "./dist/index.js"},
+             "publishConfig": {"access": "public", "registry": "https://example.invalid/"}},
+            {"exports": {".": "./dist/index.js"}},
+            {"exports": {".": "./dist/index.js"}, "publishConfig": None},
+            {"exports": {".": "./dist/index.js"}, "publishConfig": {"access": "restricted"}},
+            *({"exports": {".": "./dist/index.js"}, "publishConfig": {"access": "public"},
+               field: None} for field in ("main", "module", "browser", "typesVersions")),
             [],
         ):
             with self.subTest(manifest=manifest):
@@ -69,8 +88,49 @@ class PackAssertionTest(unittest.TestCase):
 
     def test_top_level_tag_is_rejected(self):
         self.pack([("package/package.json", tarfile.REGTYPE)],
-                  manifest={"publishConfig": {"access": "public"}, "tag": None})
+                  manifest={"publishConfig": {"access": "public"},
+                            "exports": {".": "./dist/index.js"}, "tag": None})
         self.assertNotEqual(self.check_pack().returncode, 0)
+
+    def test_allowed_exports(self):
+        for exports in ({}, {
+            ".": "./dist/index.js", "./auth": "./dist/auth/index.js",
+            "./postgres": "./dist/postgres.js", "./logging": "./dist/logging.js",
+        }):
+            with self.subTest(exports=exports):
+                self.pack([("package/package.json", tarfile.REGTYPE)],
+                          manifest={"publishConfig": {"access": "public"}, "exports": exports})
+                result = self.check_pack()
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_outside_exports_allowlist(self):
+        self.pack([("package/package.json", tarfile.REGTYPE)],
+                  manifest={"publishConfig": {"access": "public"},
+                            "exports": {"./realtime": "./dist/realtime.js"}})
+        self.assertNotEqual(self.check_pack().returncode, 0)
+
+    def test_invalid_export_targets(self):
+        for target in ("./src/index.js", "./dist/index.d.ts", {"import": "./dist/index.js"},
+                       None, "./dist/../src/index.js", "./dist/..\\src/index.js",
+                       "./dist/realtime/client.js", "./dist/Realtime/x.js",
+                       "./dist/realtime.js", "./dist/realtime.d.ts",
+                       "./dist/foo/realtime/x.js", "./dist/foo/Realtime.mjs",
+                       "./dist/foo/Realtime.js"):
+            with self.subTest(target=target):
+                self.pack([("package/package.json", tarfile.REGTYPE)],
+                          manifest={"publishConfig": {"access": "public"}, "exports": {".": target}})
+                self.assertNotEqual(self.check_pack().returncode, 0)
+
+    def test_exports_is_required_object(self):
+        for manifest in (
+            {"publishConfig": {"access": "public"}},
+            {"publishConfig": {"access": "public"}, "exports": None},
+            {"publishConfig": {"access": "public"}, "exports": []},
+            {"publishConfig": {"access": "public"}, "exports": "./dist/index.js"},
+        ):
+            with self.subTest(manifest=manifest):
+                self.pack([("package/package.json", tarfile.REGTYPE)], manifest=manifest)
+                self.assertNotEqual(self.check_pack().returncode, 0)
 
     def test_tarball_count(self):
         self.assertNotEqual(self.check_pack().returncode, 0)
@@ -114,8 +174,9 @@ class PackAssertionTest(unittest.TestCase):
         self.assertEqual(workflow.count(start), 1)
         inline = workflow.split(start, 1)[1].split("          PACK\n", 1)[0]
         lines = inline.splitlines(keepends=True)
-        self.assertTrue(all(line.startswith("          ") for line in lines))
-        self.assertEqual("".join(line[10:] for line in lines), SCRIPT.read_text())
+        self.assertTrue(all(line == "\n" or line.startswith("          ") for line in lines))
+        self.assertEqual("".join(line[10:] if line.startswith("          ") else line for line in lines),
+                         SCRIPT.read_text())
 
 
 @unittest.skipUnless(os.environ.get("PUBLISH_WORKFLOW_PATH"), "Workflow patch is delivered separately.")
