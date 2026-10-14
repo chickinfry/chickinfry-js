@@ -3,7 +3,7 @@ import { test } from "node:test";
 import dns from "node:dns";
 import net from "node:net";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import pg from "pg";
 import { createPostgresPort, cleanupBudgetMillis } from "../dist/postgres.js";
 import { Auth } from "../dist/auth/runtime.js";
@@ -17,6 +17,21 @@ async function within(work, milliseconds) {
       timer = setTimeout(() => reject(new Error("Database work did not settle within its deadline.")), milliseconds);
     })]);
   } finally { clearTimeout(timer); }
+}
+
+// The corpus lives in the CLI repo. It reaches us either through the JS CI
+// layout (CLI pinned under .ci-work/cli, see cli-generator.ref) or through
+// the CLI repo's own CI, which nests this checkout and keeps the corpus at
+// its workspace root.
+function postgresUrlCorpus() {
+  const relative = "adapters/database/postgresql/testdata/urls.json";
+  for (let dir = new URL("..", import.meta.url); ; dir = new URL("../", dir)) {
+    for (const candidate of [new URL(`.ci-work/cli/${relative}`, dir), new URL(relative, dir)]) {
+      if (existsSync(candidate)) return candidate;
+    }
+    if (dir.pathname === "/") break;
+  }
+  throw new Error("Set CHIK_POSTGRES_URL_CORPUS to the CLI checkout's adapters/database/postgresql/testdata/urls.json");
 }
 
 test("Workers cancellation settles before connect and after close without uncaught exceptions", async t => {
@@ -206,8 +221,7 @@ test("revalidation retains native identity and checks revoked, expired, disabled
 });
 
 test("shared URL corpus preserves host, port, database and case-insensitive schemes", async t => {
-  const cases = JSON.parse(readFileSync(process.env.CHIK_POSTGRES_URL_CORPUS ??
-    new URL("../.ci-work/cli/adapters/database/postgresql/testdata/urls.json",import.meta.url),"utf8"));
+  const cases = JSON.parse(readFileSync(process.env.CHIK_POSTGRES_URL_CORPUS ?? postgresUrlCorpus(),"utf8"));
   const Client = pg.Client;
   let target;
   t.mock.method(pg,"Client",function (config) {
