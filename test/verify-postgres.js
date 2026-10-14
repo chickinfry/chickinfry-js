@@ -185,7 +185,8 @@ test("startup abort and driver connect timeout settle in both timer orders", asy
 test("revalidation retains native identity and checks revoked, expired, disabled and browser sessions", async () => {
   const sessionId = "22222222-2222-4222-8222-222222222222", userId = "11111111-1111-4111-8111-111111111111";
   const session = {id:sessionId, user_id:userId, token_hash:"a".repeat(64), transport:"native", user_session_version:1,
-    created_at:"2029-01-01T00:00:00Z", expires_at:"2029-01-02T00:00:00Z", revoked_at:null};
+    created_at:"2029-01-01T00:00:00Z", expires_at:"2029-01-02T00:00:00Z", revoked_at:null,
+    first_login_at:null, last_renewed_at:null};
   const user = {id:userId, email:"fixture@example.test", session_version:1, created_at:"2029-01-01T00:00:00Z",
     disabled_at:null, password_hash:null};
   const auth = new Auth({async query(sql) { return [sql.includes('"app_auth_sessions"') ? session : user]; },

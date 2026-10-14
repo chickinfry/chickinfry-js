@@ -307,7 +307,9 @@ export const appAuthRefreshTokensTable = defineTable<AppAuthRefreshTokensRow>({
 export interface AppAuthSessionsRow {
   readonly createdAt: string;
   readonly expiresAt: string;
+  readonly firstLoginAt: string | null;
   readonly id: string;
+  readonly lastRenewedAt: string | null;
   readonly revokedAt: string | null;
   readonly tokenHash: string;
   readonly transport: string;
@@ -318,7 +320,9 @@ export interface AppAuthSessionsRow {
 export interface AppAuthSessionsInsert {
   readonly createdAt?: string;
   readonly expiresAt: string;
+  readonly firstLoginAt?: string | null;
   readonly id?: string;
+  readonly lastRenewedAt?: string | null;
   readonly revokedAt?: string | null;
   readonly tokenHash: string;
   readonly transport?: string;
@@ -329,6 +333,8 @@ export interface AppAuthSessionsInsert {
 export interface AppAuthSessionsUpdate {
   readonly createdAt?: string;
   readonly expiresAt?: string;
+  readonly firstLoginAt?: string | null;
+  readonly lastRenewedAt?: string | null;
   readonly revokedAt?: string | null;
   readonly tokenHash?: string;
   readonly transport?: string;
@@ -356,10 +362,20 @@ export const appAuthSessionsTable = defineTable<AppAuthSessionsRow>({
       encode: (value) => encodeValue("timestamp", false, value),
       decode: (value) => decodeValue("timestamp", false, value) as string,
     },
+    firstLoginAt: {
+      databaseName: "first_login_at",
+      encode: (value) => encodeValue("timestamp", true, value),
+      decode: (value) => decodeValue("timestamp", true, value) as string | null,
+    },
     id: {
       databaseName: "id",
       encode: (value) => encodeValue("id", false, value),
       decode: (value) => decodeValue("id", false, value) as string,
+    },
+    lastRenewedAt: {
+      databaseName: "last_renewed_at",
+      encode: (value) => encodeValue("timestamp", true, value),
+      decode: (value) => decodeValue("timestamp", true, value) as string | null,
     },
     revokedAt: {
       databaseName: "revoked_at",
@@ -390,7 +406,9 @@ export const appAuthSessionsTable = defineTable<AppAuthSessionsRow>({
   constraints: {
     createdAt: { unique: false, references: "" },
     expiresAt: { unique: false, references: "" },
+    firstLoginAt: { unique: false, references: "" },
     id: { unique: false, references: "" },
+    lastRenewedAt: { unique: false, references: "" },
     revokedAt: { unique: false, references: "" },
     tokenHash: { unique: true, references: "" },
     transport: { unique: false, references: "" },
