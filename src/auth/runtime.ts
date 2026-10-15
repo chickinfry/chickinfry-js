@@ -25,6 +25,7 @@ export interface AuthCleanupContext {
 
 const day = 24 * 60 * 60_000;
 const cleanupLimit = 2;
+const signupHookBudgetMillis = 5_000;
 
 export class Auth {
   private readonly db: RuntimeStore;
@@ -156,8 +157,67 @@ export class Auth {
   }
 
   private async creating(port: DatabasePort, user: AuthUser): Promise<void> {
-    try { await this.hooks.creating?.(port, user); }
-    catch { throw new AuthError("user_creation_failed", 500); }
+    const hook = this.hooks.creating;
+    if (!hook) return;
+    const started = performance.now();
+    let active = true, timedOut = false;
+    let pending: Promise<unknown> = Promise.resolve();
+    const expire = () => {
+      active = false;
+      if (!timedOut) {
+        timedOut = true;
+        try { console.error(JSON.stringify({cause: "signup_hook_timeout", elapsedMillis: Math.round(performance.now() - started)})); } catch {}
+      }
+      return new AuthError("user_creation_failed", 500);
+    };
+    const remaining = () => {
+      if (!active) throw new Error("The transaction is no longer active.");
+      const milliseconds = Math.floor(signupHookBudgetMillis - (performance.now() - started));
+      if (milliseconds <= 0) throw expire();
+      return milliseconds;
+    };
+    const limits = () => {
+      const milliseconds = remaining();
+      return port.query(`set local lock_timeout = '${milliseconds}ms'; set local statement_timeout = '${milliseconds}ms'`, []);
+    };
+    const lease: DatabasePort = {
+      query(sql, parameters) {
+        try { remaining(); } catch (error) { return Promise.reject(error); }
+        // Serialize settings with their statement; queued work must recheck the expired lease.
+        const result = pending.then(async () => {
+          await limits();
+          remaining();
+          try { return await port.query(sql, parameters); }
+          catch (error) {
+            if (error && typeof error === "object" && "code" in error && ["57014", "55P03"].includes(String(error.code))) throw expire();
+            throw error;
+          }
+        });
+        pending = result.catch(() => {});
+        return result;
+      },
+      transaction() { throw new Error("Nested transactions are not supported."); },
+    };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const original = await Promise.race([
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(expire()), signupHookBudgetMillis); }),
+        (async () => {
+          const [settings] = await port.query("select current_setting('lock_timeout') as lock_timeout, current_setting('statement_timeout') as statement_timeout", []);
+          await limits();
+          remaining();
+          await hook.call(this.hooks, lease, user);
+          await pending;
+          remaining();
+          return settings;
+        })(),
+      ]);
+      active = false;
+      clearTimeout(timer);
+      await port.query("select set_config('lock_timeout', $1, true), set_config('statement_timeout', $2, true)",
+        [original.lock_timeout, original.statement_timeout]);
+    } catch { throw new AuthError("user_creation_failed", 500); }
+    finally { active = false; clearTimeout(timer); }
   }
 
   async session(accessToken: string, transport: SessionTransport = "native"): Promise<{ id: string; email: string; sessionId: string; expiresAt: string }> {
