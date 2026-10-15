@@ -370,6 +370,7 @@ export class Auth {
       await tx.appAuthSessions.update({id: session.id}, {expiresAt,
         firstLoginAt: new Date(state.firstLoginAt).toISOString(), lastRenewedAt: new Date(now).toISOString()});
     } else if (!Number.isFinite(Date.parse(expiresAt)) || Date.parse(expiresAt) <= now) return undefined;
+    else if (state.expiresAt < Date.parse(expiresAt)) expiresAt = new Date(state.expiresAt).toISOString();
     return {id: user.id, email: user.email, sessionId: session.id, expiresAt};
   }
 

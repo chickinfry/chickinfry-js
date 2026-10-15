@@ -227,6 +227,20 @@ test("rolling sessions through PostgreSQL", {skip: !url}, async t => {
   });
 
   await t.test("current policy takes effect on access, refresh and browser without reviving expired families", async () => {
+    for (const session of [{idleTimeoutSeconds: 3600}, {absoluteLifetimeSeconds: 3600}]) {
+      clock = start;
+      const first = await login();
+      clock += 55 * 60000;
+      // Keep the access credential live while tightening the family deadline.
+      await db.appAuthSessions.update({id: first.sessionId}, {expiresAt: new Date(clock + 900000).toISOString()});
+      const runtime = auth(session);
+      assert.equal(Date.parse((await runtime.session(first.accessToken)).expiresAt), start + 3600000);
+      const request = new Request("https://api.example.test/auth.session", {headers: {authorization: "Bearer " + first.accessToken}});
+      const wire = await invokeAuth(runtime, "auth.session", {}, request);
+      assert.equal(Date.parse(wire.expires_at), start + 3600000);
+      assert.equal(Date.parse((await runtime.revalidateSession(first.sessionId, first.userId)).expiresAt), start + 3600000);
+      assert.equal(Date.parse((await db.appAuthSessions.findById({id: first.sessionId})).expiresAt), clock + 900000);
+    }
     for (const transport of ["native", "browser"]) {
       for (const absolute of [false, true]) {
         clock = start;
@@ -296,9 +310,9 @@ test("rolling sessions through PostgreSQL", {skip: !url}, async t => {
   await t.test("F-08: browser activity rolls only DB expiry and auth responses own cookies", async () => {
     clock = start;
     const runtime = auth({idleTimeoutSeconds: 3600});
-    const request = new Request("https://api.example.test/auth.browser_identity", {method: "POST"});
+    const request = new Request("https://api.example.test/auth.identity", {method: "POST"});
     const context = {credential: "", cookieName: `__Host-chik_session_${randomUUID()}`, headers: new Headers()};
-    const first = await invokeAuth(runtime, "auth.browser_identity", {provider: "rolling", credential: randomUUID()}, request, context);
+    const first = await invokeAuth(runtime, "auth.identity", {provider: "rolling", credential: randomUUID()}, request, context);
     const cookie = context.headers.get("set-cookie");
     assert.match(cookie, /; Path=\/; Secure; HttpOnly; SameSite=Strict; Max-Age=34560000$/);
     assert.ok(!cookie.includes("Domain="));
@@ -307,21 +321,21 @@ test("rolling sessions through PostgreSQL", {skip: !url}, async t => {
     for (const seconds of [600, 1200, 1801, 2400, 3000, 3601]) {
       clock = start + seconds * 1000;
       context.headers = new Headers();
-      const current = await invokeAuth(runtime, "auth.browser_session", {}, request, context);
+      const current = await invokeAuth(runtime, "auth.session", {}, request, context);
       assert.equal(Date.parse(current.expires_at), clock + 3600000);
       assert.equal(context.headers.has("set-cookie"), false);
       assert.equal(Date.parse((await db.appAuthSessions.findById({id: first.session_id})).firstLoginAt), start);
     }
     clock += 3600000;
-    await rejected(invokeAuth(runtime, "auth.browser_session", {}, request, context));
+    await rejected(invokeAuth(runtime, "auth.session", {}, request, context));
     assert.equal(context.headers.has("set-cookie"), false);
-    const replacement = await invokeAuth(runtime, "auth.browser_identity", {provider: "rolling", credential: randomUUID()}, request, context);
+    const replacement = await invokeAuth(runtime, "auth.identity", {provider: "rolling", credential: randomUUID()}, request, context);
     assert.notEqual(replacement.session_id, first.session_id);
     assert.notEqual(context.headers.get("set-cookie"), cookie);
     await rejected(runtime.session(context.credential, "browser"));
     context.credential = context.headers.get("set-cookie").split(";", 1)[0].split("=")[1];
     context.headers = new Headers();
-    await invokeAuth(runtime, "auth.browser_logout", {}, request, context);
+    await invokeAuth(runtime, "auth.logout", {}, request, context);
     assert.match(context.headers.get("set-cookie"), /Max-Age=0$/);
   });
 

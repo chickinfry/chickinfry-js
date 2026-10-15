@@ -1,7 +1,6 @@
 import { Auth, AuthError, type Tokens, type InviteSummary, type BrowserSession } from "./runtime.js";
 
 export const authOperations = ["auth.signup", "auth.signin", "auth.refresh", "auth.session", "auth.logout", "auth.identity",
-  "auth.browser_signup", "auth.browser_signin", "auth.browser_identity", "auth.browser_session", "auth.browser_logout",
   "auth.invite_issue", "auth.invite_list", "auth.invite_revoke"];
 
 export function bearer(request: Request): string {
@@ -11,6 +10,12 @@ export function bearer(request: Request): string {
 }
 
 export async function invokeAuth(auth: Auth, operation: string, input: unknown, request: Request, browser?: BrowserRequest & {headers: Headers}): Promise<unknown> {
+  const removed = /^auth\.browser_(signup|signin|identity|session|logout)$/.exec(operation);
+  if (removed) {
+    const error = new AuthError("auth_operation_removed", 400);
+    error.message = `${operation} was removed; use auth.${removed[1]}.`;
+    throw error;
+  }
   if (typeof input !== "object" || input === null || Array.isArray(input)) throw new AuthError("invalid_input", 400);
   const value = input as Record<string, unknown>;
   const text = (key: string): string => {
@@ -23,31 +28,30 @@ export async function invokeAuth(auth: Auth, operation: string, input: unknown, 
     if (!request.headers.has("authorization")) throw new AuthError("unauthenticated", 401);
     return bearer(request);
   };
-  if (operation.startsWith("auth.browser_")) {
-    if (!browser) throw new AuthError("invalid_input", 400);
+  if (browser && !operation.startsWith("auth.invite_")) {
     let result: BrowserSession;
     switch (operation) {
-      case "auth.browser_signup": result = await auth.signup(text("email"), text("password"), inviteCode(), "browser", browser.credential); break;
-      case "auth.browser_signin": result = await auth.signin(text("email"), text("password"), "browser", browser.credential); break;
-      case "auth.browser_identity": result = await auth.signinIdentity(text("provider"), value.credential, inviteCode(), "browser", browser.credential); break;
-      case "auth.browser_session": return browserInfo(await auth.session(browser.credential, "browser"));
-      case "auth.browser_logout":
+      case "auth.signup": result = await auth.signup(text("email"), text("password"), inviteCode(), "browser", browser.credential); break;
+      case "auth.signin": result = await auth.signin(text("email"), text("password"), "browser", browser.credential); break;
+      case "auth.identity": result = await auth.signinIdentity(text("provider"), value.credential, inviteCode(), "browser", browser.credential); break;
+      case "auth.session": return browserInfo(await auth.session(browser.credential, "browser"));
+      case "auth.logout":
         await auth.logout(browser.credential, "browser");
         browser.headers.set("set-cookie", browserCookie(browser.cookieName, "", 0));
         return {status: "ok"};
+      case "auth.refresh": throw new AuthError("invalid_input", 400);
       default: throw new AuthError("not_found", 404);
     }
     browser.headers.set("set-cookie", browserCookie(browser.cookieName, result.credential, result.cookieMaxAge));
     return browserInfo(result);
   }
-  if (browser && !operation.startsWith("auth.invite_")) throw new AuthError("invalid_input", 400);
   switch (operation) {
     case "auth.signup": return tokens(await auth.signup(text("email"), text("password"), inviteCode()));
     case "auth.signin": return tokens(await auth.signin(text("email"), text("password")));
     case "auth.refresh": return tokens(await auth.refresh(text("refresh_token")));
     case "auth.session": {
       const user = await auth.session(bearer(request));
-      return {id: user.id, email: user.email, session_id: user.sessionId};
+      return browserInfo(user);
     }
     case "auth.logout": await auth.logout(bearer(request)); return {status: "ok"};
     case "auth.identity": return tokens(await auth.signinIdentity(text("provider"), value.credential, inviteCode()));

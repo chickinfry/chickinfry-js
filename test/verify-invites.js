@@ -32,13 +32,13 @@ try {
   await rejects(open.refresh(browser.credential), "invalid_token");
   const browserRequestHeaders = {"origin": "https://web.example.test", "x-chik-browser": "1", "content-type": "application/json"};
   const origins = new Set([browserRequestHeaders.origin]);
-  const req = headers => new Request("https://api.example.test/auth.browser_session", {method: "POST", headers});
+  const req = headers => new Request("https://api.example.test/auth.session", {method: "POST", headers});
   assert.ok(browserRequest(req({authorization:"Bearer "+browser.credential}), "", origins) === undefined);
   const parsed = browserRequest(req(browserRequestHeaders), options.projectId, origins);
   const cookie = `${parsed.cookieName}=${browser.credential}`;
   const authenticatedRequest = req({...browserRequestHeaders, cookie});
   const context = {...browserRequest(authenticatedRequest, options.projectId, origins), headers: new Headers()};
-  const wireBrowser = await invokeAuth(open, "auth.browser_session", {}, authenticatedRequest, context);
+  const wireBrowser = await invokeAuth(open, "auth.session", {}, authenticatedRequest, context);
   assert.deepEqual(Object.keys(wireBrowser).sort(), ["email", "expires_at", "id", "session_id"]);
   assert.ok(!JSON.stringify(wireBrowser).includes(browser.credential));
   assert.equal(context.headers.has("set-cookie"), false);
