@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { randomUUID } from "node:crypto";
 import { cleanupBudgetMillis } from "../postgres.js";
 import { and, or, createDatabase, type Database, type DatabasePort, type AppAuthUsersRow, type AppAuthInvitesRow, type AppAuthSessionsRow } from "./private/database.js";
 import { encodeTimestampValue } from "../orm.js";
@@ -451,15 +452,25 @@ export class Auth {
     } catch { cleanupFailure("schedule"); }
   }
 
+  private cleanupStart(): string { return randomUUID(); }
+
   private async cleanup(db: Database, signal: AbortSignal): Promise<void> {
     let stage = "session";
     try {
       const cutoff = this.timestamp();
       let refreshBudget = cleanupLimit;
+      const start = this.cleanupStart();
+      const eligible = cleanupCandidates(this.policy, Date.parse(cutoff));
       const sessions = await db.appAuthSessions.findMany({
-        where: cleanupCandidates(this.policy, Date.parse(cutoff)),
-        orderBy: c => [c.expiresAt.asc(), c.id.asc()], limit: cleanupLimit,
+        where: c => and(eligible, c.id.greaterThanOrEquals(start)),
+        orderBy: c => [c.id.asc()], limit: cleanupLimit,
       });
+      if (sessions.length < cleanupLimit) {
+        sessions.push(...await db.appAuthSessions.findMany({
+          where: c => and(eligible, c.id.lessThan(start)),
+          orderBy: c => [c.id.asc()], limit: cleanupLimit - sessions.length,
+        }));
+      }
       for (const candidate of sessions) {
         signal.throwIfAborted();
         const deleted = await db.transaction(async tx => {

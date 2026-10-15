@@ -14,6 +14,10 @@ const clock = Date.parse("2029-01-01T00:00:00Z"), now = () => clock;
 const expired = "2020-01-01T00:00:00.000Z";
 const password = "correct horse battery staple";
 const rejects = (work, code) => assert.rejects(work, error => error instanceof AuthError && error.code === code);
+const startingAt = (runtime, id) => {
+  runtime.cleanupStart = () => id;
+  return runtime;
+};
 const observe = (base, before, after) => ({
   async query(sql, args) {
     await before?.(sql, args);
@@ -106,7 +110,7 @@ try {
   await drain();
   const cleanupMillis = performance.now() - cleanupStart;
   assert.equal(closes, 1);
-  assert.ok(rounds <= 22 && deleted <= 8, "one cleanup pass must not process the entire backlog");
+  assert.ok(rounds <= 23 && deleted <= 8, "one cleanup pass must not process the entire backlog");
   assert.ok(cleanupMillis >= 1000 && responseMillis < cleanupMillis);
   assert.equal((await auth.session(tokens.accessToken)).id, owner.userId);
   assert.ok((await db.appAuthInvites.findMany({where: c => c.expiresAt.equals(expired)})).length > 0);
@@ -123,7 +127,7 @@ try {
     const live = await auth.signin(email, password);
     const cutoff = new Date(clock - 1).toISOString();
     await db.appAuthSessions.update({id: live.sessionId}, {expiresAt: cutoff});
-    // Make this the oldest parent candidate while keeping the earlier backlog in place.
+    // Keep this legacy family eligible while testing both parent lock acquisition orders.
     await db.appAuthSessions.update({id: live.sessionId}, {expiresAt: "2010-01-01T00:00:00.000Z", firstLoginAt: null, lastRenewedAt: null});
     const locked = Promise.withResolvers(), attempted = Promise.withResolvers();
     const winner = observe(port, undefined, async (sql, args, rows) => {
@@ -142,10 +146,10 @@ try {
     if (refreshFirst) {
       const refreshing = new Auth(winner, [], now).refresh(live.refreshToken);
       await locked.promise;
-      await new Auth(other, [], now, {}, {}, cleanup(loser)).signin(email, password);
+      await startingAt(new Auth(other, [], now, {}, {}, cleanup(loser)), live.sessionId).signin(email, password);
       refreshed = await refreshing;
     } else {
-      await new Auth(other, [], now, {}, {}, cleanup(winner)).signup(`race-${randomUUID()}@example.test`, password);
+      await startingAt(new Auth(other, [], now, {}, {}, cleanup(winner)), live.sessionId).signup(`race-${randomUUID()}@example.test`, password);
       await locked.promise;
       refreshed = await new Auth(loser, [], now).refresh(live.refreshToken);
     }
@@ -213,7 +217,7 @@ try {
   const bounded = context();
   const budget = {...bounded, createPort(signal) { cleanupSignal = signal; return bounded.createPort(signal); }};
   const deadlineStart = performance.now();
-  const unaffected = await new Auth(port, [], now, {}, {}, budget).signup(`deadline-${randomUUID()}@example.test`, password);
+  const unaffected = await startingAt(new Auth(port, [], now, {}, {}, budget), blocked.id).signup(`deadline-${randomUUID()}@example.test`, password);
   try {
     await drain();
     const deadlineMillis = performance.now() - deadlineStart;
@@ -234,7 +238,7 @@ try {
   const slowRows = await expiredPair();
   const warnings = logs.length;
   const slowStart = performance.now();
-  await new Auth(port, [], now, {}, {}, through(slow.url)).signin(email, password);
+  await startingAt(new Auth(port, [], now, {}, {}, through(slow.url)), slowRows.session.id).signin(email, password);
   await drain();
   const slowMillis = performance.now() - slowStart;
   assert.ok(!await db.appAuthRefreshTokens.findById({id: slowRows.refresh.id}), "a slow connection must not leave expired rows behind");

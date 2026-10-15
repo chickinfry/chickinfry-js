@@ -40,12 +40,16 @@ test("rolling sessions through PostgreSQL", {skip: !url}, async t => {
       };
     },
   };
-  const cleanupPass = async runtime => {
+  const cleanupPass = async (runtime, origin) => {
+    if (origin !== undefined) runtime.cleanupStart = () => origin;
     selections.length = 0;
     await login(runtime);
     await Promise.all(tasks.splice(0));
-    assert.equal(selections.length, 1, "A cleanup pass must select its session batch.");
-    return selections[0];
+    assert.ok(selections.length >= 1 && selections.length <= 2, "A cleanup pass must use at most two session queries.");
+    const selected = selections.flat();
+    assert.ok(selected.length <= 2, "Wrapping must share the same session batch budget.");
+    assert.equal(new Set(selected).size, selected.length, "Wrapping must not repeat a candidate.");
+    return selected;
   };
 
   await t.test("CLEANUP-GROW(a): expanded idle delays selection but never revives stored expiry", async () => {
@@ -69,41 +73,56 @@ test("rolling sessions through PostgreSQL", {skip: !url}, async t => {
     assert.equal(await db.appAuthRefreshTokens.findById({id: refresh.id}), undefined);
   });
 
-  await t.test("CLEANUP-GROW(b): shortened idle stalls behind live legacy candidates until renewal or expiry", async () => {
+  await t.test("CLEANUP-GROW(b): keyset skips live legacy candidates and wraps within one batch", async () => {
+    clock = start;
+    const generated = [], randomRuntime = auth({}, port, cleanup);
+    const generate = randomRuntime.cleanupStart.bind(randomRuntime);
+    randomRuntime.cleanupStart = () => { const value = generate(); generated.push(value); return value; };
+    await cleanupPass(randomRuntime);
+    await cleanupPass(randomRuntime);
+    assert.equal(generated.length, 2, "Each pass must use a fresh generated start.");
+    for (const value of generated) assert.match(value, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    assert.notEqual(generated[0], generated[1]);
+
     for (const release of ["renewal", "expiry"]) {
       clock = start;
       const owner = await login();
       const userSessionVersion = (await db.appAuthUsers.findById({id: owner.userId})).sessionVersion;
       const active = [];
+      const suffix = release === "renewal" ? "1" : "2";
       // Legacy access expiry can precede a newer, still-valid refresh issuance.
       for (let i = 0; i < 2; i++) {
         const current = randomToken();
-        const session = await db.appAuthSessions.insert({userId: owner.userId, userSessionVersion, tokenHash: hashToken(randomToken()),
+        const session = await db.appAuthSessions.insert({id: `00000000-0000-4000-8000-0000000000${suffix}${i}`,
+          userId: owner.userId, userSessionVersion, tokenHash: hashToken(randomToken()),
           createdAt: new Date(clock - 3 * 3600000).toISOString(),
           expiresAt: new Date(clock - 2 * 3600000 + i * 1000).toISOString()});
         const refresh = await db.appAuthRefreshTokens.insert({sessionId: session.id, tokenHash: hashToken(current),
           createdAt: new Date(clock - 1800000).toISOString(), expiresAt: new Date(clock + day).toISOString()});
         active.push({session, refresh, current});
       }
-      const dead = await db.appAuthSessions.insert({userId: owner.userId, userSessionVersion, tokenHash: hashToken(randomToken()),
+      const dead = await db.appAuthSessions.insert({id: `ffffffff-ffff-4fff-bfff-00000000000${suffix}`,
+        userId: owner.userId, userSessionVersion, tokenHash: hashToken(randomToken()),
         createdAt: new Date(clock - 3 * 3600000).toISOString(), firstLoginAt: new Date(clock - 3 * 3600000).toISOString(),
         lastRenewedAt: new Date(clock - 2 * 3600000).toISOString(), expiresAt: new Date(clock - 3600000).toISOString()});
       const expired = await db.appAuthRefreshTokens.insert({sessionId: dead.id, tokenHash: hashToken(randomToken()),
         createdAt: dead.createdAt, expiresAt: new Date(clock - 1).toISOString()});
       const ids = active.map(({session}) => session.id);
-      assert.ok((await cleanupPass(auth({}, port, cleanup))).every(id => !ids.includes(id) && id !== dead.id));
+      assert.ok((await cleanupPass(auth({}, port, cleanup), ids[0])).every(id => !ids.includes(id) && id !== dead.id));
       const runtime = auth({idleTimeoutSeconds: 3600}, port, cleanup);
-      // Idle blockers retain their place; refreshing them would migrate their timestamps.
-      for (let pass = 1; pass <= 4; pass++) {
-        assert.deepEqual(await cleanupPass(runtime), ids, `Pass ${pass} must record the same full live batch.`);
-        for (const {session, refresh} of active) {
-          assert.equal((await db.appAuthSessions.findById({id: session.id})).revokedAt, null);
-          assert.equal((await db.appAuthRefreshTokens.findById({id: refresh.id})).consumedAt, null);
-        }
-        assert.ok(await db.appAuthSessions.findById({id: dead.id}), `Dead family remains starved after pass ${pass}.`);
-        assert.ok(await db.appAuthRefreshTokens.findById({id: expired.id}));
+      for (let repeat = 0; repeat < 2; repeat++) {
+        assert.deepEqual(await cleanupPass(runtime, ids[0]), ids, "The same start and candidates must select the same full live batch.");
+        assert.equal(selections.length, 1, "A full first range must not query the wrapped range.");
+        assert.ok(await db.appAuthSessions.findById({id: dead.id}));
       }
-      let deletionPass;
+      assert.deepEqual(await cleanupPass(runtime, dead.id), [dead.id, ids[0]], "A later start must reach the dead family and fill from the front.");
+      assert.equal(selections.length, 2);
+      assert.equal(await db.appAuthSessions.findById({id: dead.id}), undefined);
+      assert.equal(await db.appAuthRefreshTokens.findById({id: expired.id}), undefined);
+      for (const {session, refresh} of active) {
+        assert.equal((await db.appAuthSessions.findById({id: session.id})).revokedAt, null);
+        assert.equal((await db.appAuthRefreshTokens.findById({id: refresh.id})).consumedAt, null);
+      }
       if (release === "renewal") {
         const renewing = auth({idleTimeoutSeconds: 3600});
         for (const {session, current} of active) {
@@ -111,23 +130,17 @@ test("rolling sessions through PostgreSQL", {skip: !url}, async t => {
           const again = await renewing.refresh(rotated.refreshToken);
           assert.equal(again.sessionId, session.id);
         }
-        deletionPass = 5;
+        assert.ok((await cleanupPass(runtime, ids[0])).every(id => !ids.includes(id)));
       } else {
         clock = start + 1800000 - 1;
-        assert.deepEqual(await cleanupPass(runtime), ids, "Pass 5 still stalls 1ms before the live families expire.");
-        assert.ok(await db.appAuthSessions.findById({id: dead.id}));
+        assert.deepEqual(await cleanupPass(runtime, ids[0]), ids, "Live legacy families survive 1ms before the shortened idle boundary.");
         clock++;
-        assert.deepEqual(await cleanupPass(runtime), ids, "Pass 6 reaches the live families' shortened idle boundary.");
+        assert.deepEqual(await cleanupPass(runtime, ids[0]), ids, "The shortened idle boundary makes the live families eligible for deletion.");
         for (const {session, refresh} of active) {
           assert.equal(await db.appAuthSessions.findById({id: session.id}), undefined);
           assert.equal(await db.appAuthRefreshTokens.findById({id: refresh.id}), undefined);
         }
-        assert.ok(await db.appAuthSessions.findById({id: dead.id}));
-        deletionPass = 7;
       }
-      assert.ok((await cleanupPass(runtime)).includes(dead.id), `Pass ${deletionPass} reaches the dead family after blockers leave.`);
-      assert.equal(await db.appAuthSessions.findById({id: dead.id}), undefined);
-      assert.equal(await db.appAuthRefreshTokens.findById({id: expired.id}), undefined);
     }
   });
 
@@ -422,6 +435,7 @@ test("rolling sessions through PostgreSQL", {skip: !url}, async t => {
       },
     };
     const runtime = auth({}, port, context);
+    runtime.cleanupStart = () => dead.id;
     let credentials = owner;
     for (let i = 0; i < 40 && await db.appAuthSessions.findById({id: dead.id}); i++) {
       credentials = await runtime.refresh(credentials.refreshToken);
