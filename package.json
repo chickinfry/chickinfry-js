@@ -25,7 +25,7 @@
   "scripts": {
     "build": "tsc",
     "prepare": "tsc",
-    "test": "esbuild --bundle --platform=node --format=esm --outfile=test/verify-refresh.mjs test/verify-refresh.ts && node test/verify-refresh.mjs && esbuild --bundle --platform=node --format=esm --outfile=test/verify-redirect.mjs test/verify-redirect.ts && node test/verify-redirect.mjs && esbuild --bundle --platform=node --format=esm --outfile=test/verify-opaque-redirect.mjs test/verify-opaque-redirect.ts && node test/verify-opaque-redirect.mjs && node --test test/verify-postgres.js test/verify-logging.js"
+    "test": "esbuild --bundle --platform=node --format=esm --outfile=test/verify-refresh.mjs test/verify-refresh.ts && node test/verify-refresh.mjs && esbuild --bundle --platform=node --format=esm --outfile=test/verify-redirect.mjs test/verify-redirect.ts && node test/verify-redirect.mjs && esbuild --bundle --platform=node --format=esm --outfile=test/verify-opaque-redirect.mjs test/verify-opaque-redirect.ts && node test/verify-opaque-redirect.mjs && node --test test/verify-postgres.js test/verify-logging.js test/verify-session-policy.js"
   },
   "dependencies": {
     "pg": "8.23.0",

@@ -124,7 +124,7 @@ try {
     const cutoff = new Date(clock - 1).toISOString();
     await db.appAuthSessions.update({id: live.sessionId}, {expiresAt: cutoff});
     // Make this the oldest parent candidate while keeping the earlier backlog in place.
-    await db.appAuthSessions.update({id: live.sessionId}, {expiresAt: "2010-01-01T00:00:00.000Z"});
+    await db.appAuthSessions.update({id: live.sessionId}, {expiresAt: "2010-01-01T00:00:00.000Z", firstLoginAt: null, lastRenewedAt: null});
     const locked = Promise.withResolvers(), attempted = Promise.withResolvers();
     const winner = observe(port, undefined, async (sql, args, rows) => {
       if (sql.startsWith('update "public"."app_auth_sessions"') && rows[0]?.id === live.sessionId) {
@@ -252,7 +252,7 @@ try {
   const stuckMillis = performance.now() - stuckStart;
   assert.ok(await db.appAuthRefreshTokens.findById({id: stuckRows.refresh.id}), "a delay beyond the budget must leave expired rows in place");
   assert.ok(stuckMillis >= cleanupBudgetMillis - 100 && stuckMillis < 8_000);
-  assert.deepEqual(logs.at(-1), ["Authentication cleanup failed (refresh)."]);
+  assert.deepEqual(logs.at(-1), ["Authentication cleanup failed (session)."]);
   assert.equal(logs.length, warnings + 1);
   console.log(JSON.stringify({risk: "over-budget-connect", stuckMillis: +stuckMillis.toFixed(1)}));
   await stuck.close();

@@ -65,7 +65,7 @@ func TestInvitationsWithPostgreSQL(t *testing.T) {
 	if _, err := postgresql.Migrate(t.Context(), connection, auth.Schema()); err != nil {
 		t.Fatal(err)
 	}
-	for _, script := range []string{"verify-invites.js", "verify-postgres.js"} {
+	for _, script := range []string{"verify-sessions.js", "verify-invites.js", "verify-postgres.js"} {
 		command := exec.CommandContext(t.Context(), "node", filepath.Join(root, "test", script))
 		command.Env = append(os.Environ(), "CHIK_TEST_DATABASE_URL="+connection, "CHIK_TEST_DATABASE_CA="+cert, "CHIK_TEST_DATABASE_KEY="+key)
 		if out, err := command.CombinedOutput(); err != nil {

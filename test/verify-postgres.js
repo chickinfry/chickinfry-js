@@ -209,8 +209,12 @@ test("revalidation retains native identity and checks revoked, expired, disabled
     first_login_at:null, last_renewed_at:null};
   const user = {id:userId, email:"fixture@example.test", session_version:1, created_at:"2029-01-01T00:00:00Z",
     disabled_at:null, password_hash:null};
-  const auth = new Auth({async query(sql) { return [sql.includes('"app_auth_sessions"') ? session : user]; },
-    async transaction() { throw new Error("unexpected transaction"); }}, [], () => Date.parse("2029-01-01T12:00:00Z"));
+  const refresh = {id:"33333333-3333-4333-8333-333333333333", session_id:sessionId, token_hash:"b".repeat(64),
+    created_at:session.created_at, expires_at:"2029-01-31T00:00:00Z", consumed_at:null};
+  const port = {async query(sql) {
+    return [sql.includes('"app_auth_sessions"') ? session : sql.includes('"app_auth_refresh_tokens"') ? refresh : user];
+  }, async transaction(work) { return work(port); }};
+  const auth = new Auth(port, [], () => Date.parse("2029-01-01T12:00:00Z"));
   assert.equal((await auth.revalidateSession(sessionId, userId)).id, userId);
   await assert.rejects(auth.session(sessionId), {code:"invalid_token"});
   await assert.rejects(auth.revalidateSession(sessionId, "33333333-3333-4333-8333-333333333333"), {code:"invalid_token"});

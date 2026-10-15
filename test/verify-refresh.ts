@@ -13,16 +13,18 @@ let refreshToken = "b".repeat(43);
 let refreshes = 0;
 let cleared = false;
 let rejectRefresh = false;
+let refreshExpiresAt = "2099-01-02T00:00:00Z";
 interface Credentials {
   accessToken: string; refreshToken: string; expiresAt: string;
   refreshExpiresAt: string; userId: string; sessionId: string;
 }
 const store = {
-  credentials: (): Credentials => ({accessToken,refreshToken,expiresAt:"2099-01-01T00:00:00Z",refreshExpiresAt:"2099-01-02T00:00:00Z",userId:"user",sessionId:"session"}),
+  credentials: (): Credentials => ({accessToken,refreshToken,expiresAt:"2099-01-01T00:00:00Z",refreshExpiresAt,userId:"user",sessionId:"session"}),
   refresh: async (operation: (credentials: Credentials) => Promise<Credentials>) => {
     const refreshed = await operation({accessToken,refreshToken,expiresAt:"2099-01-01T00:00:00Z",refreshExpiresAt:"2099-01-02T00:00:00Z",userId:"user",sessionId:"session"});
     accessToken = refreshed.accessToken;
     refreshToken = refreshed.refreshToken;
+    refreshExpiresAt = refreshed.refreshExpiresAt;
     return refreshed;
   },
   clear: async (expected: Credentials) => {
@@ -38,7 +40,7 @@ globalThis.fetch = async (input, init) => {
     refreshes += 1;
     if (rejectRefresh) return new Response(JSON.stringify({error:"invalid_token"}),{status:401});
     if (refreshes > 1) return new Response(JSON.stringify({error:"invalid_token"}),{status:401});
-    return new Response(JSON.stringify({access_token:newAccessToken,refresh_token:"d".repeat(43),expires_at:"2099-01-01T00:00:00Z",refresh_expires_at:"2099-01-02T00:00:00Z",user_id:"user",session_id:"session"}),{status:200});
+    return new Response(JSON.stringify({access_token:newAccessToken,refresh_token:"d".repeat(43),expires_at:"2099-01-01T00:00:00Z",refresh_expires_at:"2099-02-02T00:00:00Z",user_id:"user",session_id:"session"}),{status:200});
   }
   if (new Headers(init?.headers).get("authorization") !== "Bearer "+newAccessToken) {
     return new Response(JSON.stringify({error:"invalid_token"}),{status:401});
@@ -52,6 +54,7 @@ try {
   if (refreshes !== 1 || accessToken !== newAccessToken || refreshToken !== "d".repeat(43) || cleared) {
     throw new Error("Refresh state mismatch.");
   }
+  assert.equal(refreshExpiresAt, "2099-02-02T00:00:00Z", "Rolling expiry was not persisted.");
   rejectRefresh = true;
   accessToken = oldAccessToken;
   refreshToken = "e".repeat(43);

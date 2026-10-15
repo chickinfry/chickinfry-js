@@ -3,6 +3,9 @@ import { cleanupBudgetMillis } from "../postgres.js";
 import { and, or, createDatabase, type Database, type DatabasePort, type AppAuthUsersRow, type AppAuthInvitesRow, type AppAuthSessionsRow } from "./private/database.js";
 import { encodeTimestampValue } from "../orm.js";
 import { hashPassword, verifyPassword, randomToken, hashToken } from "./crypto.js";
+import { sessionPolicy, sessionExpiry, sessionState, cleanupCandidates, cookieMaxAge, accessLifetimeMillis, type SessionPolicy } from "./policy.js";
+
+export type { SessionPolicy } from "./policy.js";
 
 export class AuthError extends Error {
   constructor(readonly code: string, readonly status: number) {
@@ -24,6 +27,7 @@ export type SessionTransport = "native" | "browser";
 
 export interface BrowserSession {
   readonly credential: string;
+  readonly cookieMaxAge: number;
   readonly id: string;
   readonly email: string;
   readonly sessionId: string;
@@ -55,6 +59,7 @@ export interface AuthActor {
 export interface AuthOptions {
   readonly signup?: "open" | "invite-only";
   readonly projectId?: string;
+  readonly session?: SessionPolicy;
 }
 
 /** The generated server's runtime context owns cleanup completion and dedicated port shutdown. */
@@ -77,6 +82,7 @@ const cleanupLimit = 2;
 export class Auth {
   private readonly providers = new Map<string, IdentityProvider>();
   private readonly db: Database;
+  private readonly policy: Required<SessionPolicy>;
 
   constructor(
     private readonly port: DatabasePort,
@@ -90,6 +96,7 @@ export class Auth {
       throw new Error("Invalid signup policy.");
     }
     this.db = createDatabase(port);
+    this.policy = sessionPolicy(options.session);
     for (const provider of providers) {
       if (!/^[a-z][a-z0-9_-]{0,62}$/.test(provider.id) || provider.id === "password" || this.providers.has(provider.id)) {
         throw new Error("Invalid or duplicate identity provider.");
@@ -99,8 +106,8 @@ export class Auth {
   }
 
   async signup(email: string, password: string, inviteCode?: string, transport?: "native"): Promise<Tokens>;
-  async signup(email: string, password: string, inviteCode: string, transport: "browser"): Promise<BrowserSession>;
-  async signup(email: string, password: string, inviteCode = "", transport: SessionTransport = "native"): Promise<Tokens | BrowserSession> {
+  async signup(email: string, password: string, inviteCode: string, transport: "browser", previousCredential?: string): Promise<BrowserSession>;
+  async signup(email: string, password: string, inviteCode = "", transport: SessionTransport = "native", previousCredential = ""): Promise<Tokens | BrowserSession> {
     email = normalizeEmail(email);
     validatePassword(password);
     if (typeof inviteCode !== "string") throw new AuthError("invalid_input", 400);
@@ -117,7 +124,7 @@ export class Auth {
         if (invite) await tx.appAuthInvites.update({id: invite.id}, {redeemedAt: this.timestamp(), redeemedBy: user.id});
         created = publicUser(user);
         await this.creating(port, created);
-        return this.issue(tx, user, transport);
+        return this.issue(tx, user, transport, previousCredential);
       });
     } catch (error) {
       if (uniqueViolation(error)) throw new AuthError("account_exists", 409);
@@ -129,22 +136,22 @@ export class Auth {
   }
 
   async signin(email: string, password: string, transport?: "native"): Promise<Tokens>;
-  async signin(email: string, password: string, transport: "browser"): Promise<BrowserSession>;
-  async signin(email: string, password: string, transport: SessionTransport = "native"): Promise<Tokens | BrowserSession> {
+  async signin(email: string, password: string, transport: "browser", previousCredential?: string): Promise<BrowserSession>;
+  async signin(email: string, password: string, transport: SessionTransport = "native", previousCredential = ""): Promise<Tokens | BrowserSession> {
     email = normalizeEmail(email);
     validatePassword(password);
     await this.rateLimit("signin", email);
     const user = (await this.db.appAuthUsers.findMany({ where: c => c.email.equals(email), limit: 1 }))[0];
     const matched = await verifyPassword(password, user?.passwordHash ?? null);
     if (!matched || !user || user.disabledAt !== null) throw new AuthError("invalid_credentials", 401);
-    const tokens = await this.db.transaction(tx => this.issue(tx, user, transport));
+    const tokens = await this.db.transaction(tx => this.issue(tx, user, transport, previousCredential));
     this.scheduleCleanup();
     return tokens;
   }
 
   async signinIdentity(providerID: string, credential: unknown, inviteCode?: string, transport?: "native"): Promise<Tokens>;
-  async signinIdentity(providerID: string, credential: unknown, inviteCode: string, transport: "browser"): Promise<BrowserSession>;
-  async signinIdentity(providerID: string, credential: unknown, inviteCode = "", transport: SessionTransport = "native"): Promise<Tokens | BrowserSession> {
+  async signinIdentity(providerID: string, credential: unknown, inviteCode: string, transport: "browser", previousCredential?: string): Promise<BrowserSession>;
+  async signinIdentity(providerID: string, credential: unknown, inviteCode = "", transport: SessionTransport = "native", previousCredential = ""): Promise<Tokens | BrowserSession> {
     if (typeof inviteCode !== "string") throw new AuthError("invalid_input", 400);
     const provider = this.providers.get(providerID);
     if (!provider) throw new AuthError("unsupported_identity_provider", 400);
@@ -179,7 +186,7 @@ export class Auth {
           created = publicUser(user);
           await this.creating(port, created);
         }
-        return this.issue(tx, user, transport);
+        return this.issue(tx, user, transport, previousCredential);
       });
     } catch (error) {
       if (uniqueViolation(error)) throw new AuthError("identity_conflict", 409);
@@ -251,19 +258,19 @@ export class Auth {
     work: (context: {db: Database; actor: AuthActor}) => Promise<T>, transport: SessionTransport): Promise<T> {
     if (this.options.signup !== "invite-only") throw new AuthError("not_found", 404);
     validateToken(accessToken);
-    return this.port.transaction(async port => {
+    const result = await this.port.transaction(async port => {
       const db = createDatabase(port);
       const candidate = (await db.appAuthSessions.findMany({where: c => c.tokenHash.equals(hashToken(accessToken)), limit: 1}))[0];
       if (candidate && candidate.transport !== transport) {
         throw new AuthError(transport === "browser" ? "invalid_input" : "invalid_token", transport === "browser" ? 400 : 401);
       }
-      if (!candidate) throw new AuthError("invalid_token", 401);
-      const session = await db.appAuthSessions.updateIf({id: candidate.id}, c => and(c.tokenHash.equals(hashToken(accessToken)),
-        c.revokedAt.isNull(), c.expiresAt.greaterThan(this.timestamp())), {expiresAt: candidate.expiresAt});
-      if (!session || Date.parse(session.expiresAt) <= this.now()) throw new AuthError("invalid_token", 401);
-      const user = await db.appAuthUsers.updateIf({id: session.userId}, c => and(c.disabledAt.isNull(),
+      const session = await this.lockSession(db, candidate, hashToken(accessToken));
+      if (!session) return undefined;
+      const authenticated = await this.validateSession(db, session);
+      if (!authenticated) return undefined;
+      const user = await db.appAuthUsers.updateIf({id: authenticated.id}, c => and(c.disabledAt.isNull(),
         c.sessionVersion.equals(session.userSessionVersion)), {sessionVersion: session.userSessionVersion});
-      if (!user) throw new AuthError("invalid_token", 401);
+      if (!user) return undefined;
       if (!this.hooks.inviteManaging) throw new AuthError("permission_denied", 403);
       const projectId = this.options.projectId;
       if (!projectId || !uuidPattern.test(projectId)) throw new AuthError("service_unavailable", 503);
@@ -273,8 +280,10 @@ export class Auth {
         if (error instanceof AuthError) throw error;
         throw new AuthError("permission_denied", 403);
       }
-      return work({db, actor});
+      return {value: await work({db, actor})};
     });
+    if (!result) throw new AuthError("invalid_token", 401);
+    return result.value;
   }
 
   private async checkInvite(db: Database, email: string, code: string): Promise<AppAuthInvitesRow> {
@@ -310,28 +319,57 @@ export class Auth {
 
   async session(accessToken: string, transport: SessionTransport = "native"): Promise<{ id: string; email: string; sessionId: string; expiresAt: string }> {
     validateToken(accessToken);
-    const session = (await this.db.appAuthSessions.findMany({where: c => c.tokenHash.equals(hashToken(accessToken)), limit: 1}))[0];
-    if (session && session.transport !== transport) throw new AuthError(transport === "browser" ? "invalid_input" : "invalid_token", transport === "browser" ? 400 : 401);
-    return this.validateSession(session);
+    const result = await this.db.transaction(async tx => {
+      const candidate = (await tx.appAuthSessions.findMany({where: c => c.tokenHash.equals(hashToken(accessToken)), limit: 1}))[0];
+      if (candidate && candidate.transport !== transport) throw new AuthError(transport === "browser" ? "invalid_input" : "invalid_token", transport === "browser" ? 400 : 401);
+      const session = await this.lockSession(tx, candidate, hashToken(accessToken));
+      return session && this.validateSession(tx, session);
+    });
+    if (!result) throw new AuthError("invalid_token", 401);
+    return result;
   }
 
   /** Revalidates an already authenticated native connection; session IDs cannot establish a login. */
   async revalidateSession(sessionId: string, userId: string): Promise<{ id: string; email: string; sessionId: string; expiresAt: string }> {
-    const session = await this.db.appAuthSessions.findById({id: sessionId});
-    if (session?.userId !== userId || session.transport !== "native") throw new AuthError("invalid_token", 401);
-    return this.validateSession(session);
+    const result = await this.db.transaction(async tx => {
+      const candidate = await tx.appAuthSessions.findById({id: sessionId});
+      if (candidate?.userId !== userId || candidate.transport !== "native") return undefined;
+      const session = await this.lockSession(tx, candidate);
+      return session && this.validateSession(tx, session);
+    });
+    if (!result) throw new AuthError("invalid_token", 401);
+    return result;
   }
 
-  private async validateSession(session: AppAuthSessionsRow | undefined): Promise<{ id: string; email: string; sessionId: string; expiresAt: string }> {
-    if (!session || session.revokedAt !== null ||
-        !Number.isFinite(Date.parse(session.expiresAt)) || Date.parse(session.expiresAt) <= this.now()) {
-      throw new AuthError("invalid_token", 401);
+  private lockSession(tx: Database, candidate: AppAuthSessionsRow | undefined, tokenHash?: string): Promise<AppAuthSessionsRow | undefined> {
+    if (!candidate) return Promise.resolve(undefined);
+    return tx.appAuthSessions.updateIf({id: candidate.id}, c => tokenHash
+      ? and(c.revokedAt.isNull(), c.tokenHash.equals(tokenHash)) : c.revokedAt.isNull(), {revokedAt: null});
+  }
+
+  private async familyState(tx: Database, session: AppAuthSessionsRow, now: number) {
+    const latest = session.transport === "native" ? (await tx.appAuthRefreshTokens.findMany({
+      where: c => and(c.sessionId.equals(session.id), c.consumedAt.isNull()), orderBy: c => [c.createdAt.desc(), c.id.desc()], limit: 1,
+    }))[0] : undefined;
+    return sessionState(session, latest, this.policy, now);
+  }
+
+  private async validateSession(tx: Database, session: AppAuthSessionsRow) {
+    const now = this.now();
+    const state = await this.familyState(tx, session, now);
+    if (state.expired) {
+      await tx.appAuthSessions.update({id: session.id}, {revokedAt: new Date(now).toISOString()});
+      return undefined;
     }
-    const user = await this.db.appAuthUsers.findById({id: session.userId});
-    if (!user || user.disabledAt !== null || user.sessionVersion !== session.userSessionVersion) {
-      throw new AuthError("invalid_token", 401);
-    }
-    return {id: user.id, email: user.email, sessionId: session.id, expiresAt: session.expiresAt};
+    const user = await tx.appAuthUsers.findById({id: session.userId});
+    if (!user || user.disabledAt !== null || user.sessionVersion !== session.userSessionVersion) return undefined;
+    let expiresAt = session.expiresAt;
+    if (state.renew) {
+      expiresAt = new Date(sessionExpiry(this.policy, state.firstLoginAt, now)).toISOString();
+      await tx.appAuthSessions.update({id: session.id}, {expiresAt,
+        firstLoginAt: new Date(state.firstLoginAt).toISOString(), lastRenewedAt: new Date(now).toISOString()});
+    } else if (!Number.isFinite(Date.parse(expiresAt)) || Date.parse(expiresAt) <= now) return undefined;
+    return {id: user.id, email: user.email, sessionId: session.id, expiresAt};
   }
 
   async logout(accessToken: string, transport: SessionTransport = "native"): Promise<void> {
@@ -359,23 +397,28 @@ export class Auth {
       const session = await tx.appAuthSessions.updateIf({id: stored.sessionId}, c => c.revokedAt.isNull(), {revokedAt: null});
       if (!session || session.transport !== "native") return undefined;
       const current = await tx.appAuthRefreshTokens.findById({id: stored.id});
+      const issuedAt = this.now();
+      const state = await this.familyState(tx, session, issuedAt);
       const user = await tx.appAuthUsers.findById({id: session.userId});
-      if (!current || current.consumedAt !== null || Date.parse(current.expiresAt) <= this.now() ||
+      if (!current || current.consumedAt !== null || state.expired || Date.parse(current.expiresAt) <= issuedAt ||
           !user || user.disabledAt !== null || user.sessionVersion !== session.userSessionVersion) {
         await tx.appAuthSessions.update({id: session.id}, {revokedAt: this.timestamp()});
         return undefined;
       }
-      const consumed = await tx.appAuthRefreshTokens.updateIf({id: current.id}, c => c.consumedAt.isNull(), {consumedAt: this.timestamp()});
+      const timestamp = new Date(issuedAt).toISOString();
+      const consumed = await tx.appAuthRefreshTokens.updateIf({id: current.id}, c => c.consumedAt.isNull(), {consumedAt: timestamp});
       if (!consumed) {
         await tx.appAuthSessions.update({id: session.id}, {revokedAt: this.timestamp()});
         return undefined;
       }
       const accessToken = randomToken();
       const nextRefresh = randomToken();
-      const expiresAt = new Date(this.now() + 15 * 60_000).toISOString();
-      await tx.appAuthSessions.update({id: session.id}, {tokenHash: hashToken(accessToken), expiresAt});
-      await tx.appAuthRefreshTokens.insert({sessionId: session.id, tokenHash: hashToken(nextRefresh), expiresAt: current.expiresAt});
-      return {accessToken, refreshToken: nextRefresh, expiresAt, refreshExpiresAt: current.expiresAt, userId: user.id, sessionId: session.id};
+      const expiresAt = new Date(issuedAt + accessLifetimeMillis).toISOString();
+      const refreshExpiresAt = new Date(sessionExpiry(this.policy, state.firstLoginAt, issuedAt)).toISOString();
+      await tx.appAuthSessions.update({id: session.id}, {tokenHash: hashToken(accessToken), expiresAt,
+        firstLoginAt: new Date(state.firstLoginAt).toISOString(), lastRenewedAt: timestamp});
+      await tx.appAuthRefreshTokens.insert({sessionId: session.id, tokenHash: hashToken(nextRefresh), expiresAt: refreshExpiresAt, createdAt: timestamp});
+      return {accessToken, refreshToken: nextRefresh, expiresAt, refreshExpiresAt, userId: user.id, sessionId: session.id};
     });
     if (!outcome) throw new AuthError("session_revoked", 401);
     this.scheduleCleanup();
@@ -409,37 +452,31 @@ export class Auth {
   }
 
   private async cleanup(db: Database, signal: AbortSignal): Promise<void> {
-    let stage = "refresh";
+    let stage = "session";
     try {
       const cutoff = this.timestamp();
-      const refresh = await db.appAuthRefreshTokens.findMany({
-        where: c => c.expiresAt.lessThanOrEquals(cutoff),
-        orderBy: c => [c.expiresAt.asc(), c.id.asc()], limit: cleanupLimit,
-      });
-      if (refresh.length) await db.transaction(async tx => {
-        for (const candidate of refresh) {
-          const current = await tx.appAuthRefreshTokens.findById({id: candidate.id});
-          if (current && Date.parse(current.expiresAt) <= Date.parse(cutoff)) {
-            await tx.appAuthRefreshTokens.delete({id: current.id});
-          }
-        }
-      });
-
-      stage = "session";
-      signal.throwIfAborted();
+      let refreshBudget = cleanupLimit;
       const sessions = await db.appAuthSessions.findMany({
-        where: c => c.expiresAt.lessThanOrEquals(cutoff),
+        where: cleanupCandidates(this.policy, Date.parse(cutoff)),
         orderBy: c => [c.expiresAt.asc(), c.id.asc()], limit: cleanupLimit,
       });
-      for (const candidate of sessions) await db.transaction(async tx => {
-        // Lock the parent in the same order as refresh, then check its children.
-        const locked = await tx.appAuthSessions.updateIf({id: candidate.id},
-          c => and(c.expiresAt.equals(candidate.expiresAt), c.expiresAt.lessThanOrEquals(cutoff)),
-          {expiresAt: candidate.expiresAt});
-        if (!locked) return;
-        const children = await tx.appAuthRefreshTokens.findMany({where: c => c.sessionId.equals(locked.id), limit: 1});
-        if (!children.length) await tx.appAuthSessions.delete({id: locked.id});
-      });
+      for (const candidate of sessions) {
+        signal.throwIfAborted();
+        const deleted = await db.transaction(async tx => {
+          // Candidate timestamps never authorize deletion; recheck the locked family under Q1.
+          const locked = await tx.appAuthSessions.updateIf({id: candidate.id},
+            c => c.expiresAt.equals(candidate.expiresAt),
+            {expiresAt: candidate.expiresAt});
+          if (!locked || !(await this.familyState(tx, locked, this.now())).expired) return 0;
+          const children = await tx.appAuthRefreshTokens.findMany({where: c => c.sessionId.equals(locked.id),
+            orderBy: c => [c.createdAt.asc(), c.id.asc()], limit: refreshBudget + 1});
+          const deleting = children.slice(0, refreshBudget);
+          for (const child of deleting) await tx.appAuthRefreshTokens.delete({id: child.id});
+          if (children.length === deleting.length) await tx.appAuthSessions.delete({id: locked.id});
+          return deleting.length;
+        });
+        refreshBudget -= deleted;
+      }
 
       stage = "rate_limit";
       signal.throwIfAborted();
@@ -477,16 +514,25 @@ export class Auth {
     }
   }
 
-  private async issue(tx: Database, user: AppAuthUsersRow, transport: SessionTransport): Promise<Tokens | BrowserSession> {
+  private async issue(tx: Database, user: AppAuthUsersRow, transport: SessionTransport, previousCredential = ""): Promise<Tokens | BrowserSession> {
+    if (transport === "browser" && /^[A-Za-z0-9_-]{43}$/.test(previousCredential)) {
+      const previous = (await tx.appAuthSessions.findMany({where: c => c.tokenHash.equals(hashToken(previousCredential)), limit: 1}))[0];
+      if (previous) {
+        if (previous.transport !== "browser") throw new AuthError("invalid_input", 400);
+        await tx.appAuthSessions.updateIf({id: previous.id}, c => c.revokedAt.isNull(), {revokedAt: this.timestamp()});
+      }
+    }
     const accessToken = randomToken();
     const issuedAt = this.now();
-    const expiresAt = new Date(issuedAt + (transport === "browser" ? 7 * day : 15 * 60_000)).toISOString();
-    const refreshExpiresAt = new Date(this.now() + 7 * 24 * 60 * 60_000).toISOString();
+    const timestamp = new Date(issuedAt).toISOString();
+    const refreshExpiresAt = new Date(sessionExpiry(this.policy, issuedAt, issuedAt)).toISOString();
+    const expiresAt = transport === "browser" ? refreshExpiresAt : new Date(issuedAt + accessLifetimeMillis).toISOString();
     const session = await tx.appAuthSessions.insert({userId: user.id, tokenHash: hashToken(accessToken), userSessionVersion: user.sessionVersion, expiresAt, transport,
-      ...(transport === "browser" ? {createdAt: new Date(issuedAt).toISOString()} : {})});
-    if (transport === "browser") return {credential: accessToken, id: user.id, email: user.email, sessionId: session.id, expiresAt};
+      createdAt: timestamp, firstLoginAt: timestamp, lastRenewedAt: timestamp});
+    if (transport === "browser") return {credential: accessToken, cookieMaxAge: cookieMaxAge(this.policy, issuedAt, issuedAt),
+      id: user.id, email: user.email, sessionId: session.id, expiresAt};
     const refreshToken = randomToken();
-    await tx.appAuthRefreshTokens.insert({sessionId: session.id, tokenHash: hashToken(refreshToken), expiresAt: refreshExpiresAt});
+    await tx.appAuthRefreshTokens.insert({sessionId: session.id, tokenHash: hashToken(refreshToken), expiresAt: refreshExpiresAt, createdAt: timestamp});
     return {accessToken, refreshToken, expiresAt, refreshExpiresAt, userId: user.id, sessionId: session.id};
   }
 

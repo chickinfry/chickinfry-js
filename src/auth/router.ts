@@ -27,9 +27,9 @@ export async function invokeAuth(auth: Auth, operation: string, input: unknown, 
     if (!browser) throw new AuthError("invalid_input", 400);
     let result: BrowserSession;
     switch (operation) {
-      case "auth.browser_signup": result = await auth.signup(text("email"), text("password"), inviteCode(), "browser"); break;
-      case "auth.browser_signin": result = await auth.signin(text("email"), text("password"), "browser"); break;
-      case "auth.browser_identity": result = await auth.signinIdentity(text("provider"), value.credential, inviteCode(), "browser"); break;
+      case "auth.browser_signup": result = await auth.signup(text("email"), text("password"), inviteCode(), "browser", browser.credential); break;
+      case "auth.browser_signin": result = await auth.signin(text("email"), text("password"), "browser", browser.credential); break;
+      case "auth.browser_identity": result = await auth.signinIdentity(text("provider"), value.credential, inviteCode(), "browser", browser.credential); break;
       case "auth.browser_session": return browserInfo(await auth.session(browser.credential, "browser"));
       case "auth.browser_logout":
         await auth.logout(browser.credential, "browser");
@@ -37,8 +37,7 @@ export async function invokeAuth(auth: Auth, operation: string, input: unknown, 
         return {status: "ok"};
       default: throw new AuthError("not_found", 404);
     }
-    browser.headers.set("set-cookie", browserCookie(browser.cookieName, result.credential,
-      Math.max(0, Math.min(604800, Math.floor((Date.parse(result.expiresAt) - Date.now()) / 1000)))));
+    browser.headers.set("set-cookie", browserCookie(browser.cookieName, result.credential, result.cookieMaxAge));
     return browserInfo(result);
   }
   if (browser && !operation.startsWith("auth.invite_")) throw new AuthError("invalid_input", 400);

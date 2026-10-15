@@ -27,7 +27,7 @@ try {
   assert.ok(storedBrowser.transport === "browser" && storedBrowser.tokenHash === hashToken(browser.credential));
   assert.equal((await db.appAuthRefreshTokens.findMany({where: c => c.sessionId.equals(browser.sessionId)})).length, 0);
   assert.ok(Date.parse(storedBrowser.createdAt) === clock);
-  assert.equal(Date.parse(browser.expiresAt) - Date.parse(storedBrowser.createdAt), 604800000);
+  assert.equal(Date.parse(browser.expiresAt) - Date.parse(storedBrowser.createdAt), 2592000000);
   await rejects(open.session(browser.credential), "invalid_token");
   await rejects(open.refresh(browser.credential), "invalid_token");
   const browserRequestHeaders = {"origin": "https://web.example.test", "x-chik-browser": "1", "content-type": "application/json"};
@@ -49,8 +49,9 @@ try {
   }
   clock = Date.parse(browser.expiresAt) - 1;
   assert.ok((await open.session(browser.credential, "browser")).sessionId === browser.sessionId);
-  assert.equal((await db.appAuthSessions.findById({id: browser.sessionId})).expiresAt, browser.expiresAt);
-  clock++;
+  const renewedBrowser = await db.appAuthSessions.findById({id: browser.sessionId});
+  assert.equal(Date.parse(renewedBrowser.expiresAt), clock + 2592000000);
+  clock = Date.parse(renewedBrowser.expiresAt);
   await rejects(open.session(browser.credential, "browser"), "invalid_token");
   await open.logout(browser.credential, "browser");
   await open.logout(browser.credential, "browser");
