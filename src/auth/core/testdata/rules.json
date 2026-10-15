@@ -1,0 +1,508 @@
+[
+  {
+    "name": "browser-before-idle",
+    "rule": "sessionState",
+    "args": [
+      {
+        "createdAt": "2024-12-31T22:00:00.000Z",
+        "firstLoginAt": "2024-12-31T22:00:00.000Z",
+        "lastRenewedAt": "2024-12-31T23:00:00.000Z",
+        "expiresAt": "2025-01-01T01:00:00.000Z",
+        "revokedAt": null,
+        "transport": "browser"
+      },
+      null,
+      {
+        "idleTimeoutSeconds": 3600,
+        "absoluteLifetimeSeconds": 0
+      },
+      1735689599999
+    ],
+    "expected": {
+      "firstLoginAt": 1735682400000,
+      "expiresAt": 1735689600000,
+      "expired": false,
+      "renew": true
+    }
+  },
+  {
+    "name": "browser-at-idle",
+    "rule": "sessionState",
+    "args": [
+      {
+        "createdAt": "2024-12-31T22:00:00.000Z",
+        "firstLoginAt": "2024-12-31T22:00:00.000Z",
+        "lastRenewedAt": "2024-12-31T23:00:00.000Z",
+        "expiresAt": "2025-01-01T01:00:00.000Z",
+        "revokedAt": null,
+        "transport": "browser"
+      },
+      null,
+      {
+        "idleTimeoutSeconds": 3600,
+        "absoluteLifetimeSeconds": 0
+      },
+      1735689600000
+    ],
+    "expected": {
+      "firstLoginAt": 1735682400000,
+      "expiresAt": 1735689600000,
+      "expired": true,
+      "renew": false
+    }
+  },
+  {
+    "name": "stored-expiry-first",
+    "rule": "sessionState",
+    "args": [
+      {
+        "createdAt": "2024-12-31T22:00:00.000Z",
+        "firstLoginAt": "2024-12-31T22:00:00.000Z",
+        "lastRenewedAt": "2024-12-31T23:00:00.000Z",
+        "expiresAt": "2024-12-31T23:59:59.998Z",
+        "revokedAt": null,
+        "transport": "browser"
+      },
+      null,
+      {
+        "idleTimeoutSeconds": 7200,
+        "absoluteLifetimeSeconds": 0
+      },
+      1735689599999
+    ],
+    "expected": {
+      "firstLoginAt": 1735682400000,
+      "expiresAt": 1735689599998,
+      "expired": true,
+      "renew": false
+    }
+  },
+  {
+    "name": "shortened-policy",
+    "rule": "sessionState",
+    "args": [
+      {
+        "createdAt": "2024-12-31T22:00:00.000Z",
+        "firstLoginAt": "2024-12-31T22:00:00.000Z",
+        "lastRenewedAt": "2024-12-31T23:00:00.000Z",
+        "expiresAt": "2025-01-01T01:00:00.000Z",
+        "revokedAt": null,
+        "transport": "browser"
+      },
+      null,
+      {
+        "idleTimeoutSeconds": 3600,
+        "absoluteLifetimeSeconds": 0
+      },
+      1735689600001
+    ],
+    "expected": {
+      "firstLoginAt": 1735682400000,
+      "expiresAt": 1735689600000,
+      "expired": true,
+      "renew": false
+    }
+  },
+  {
+    "name": "absolute-cap",
+    "rule": "sessionState",
+    "args": [
+      {
+        "createdAt": "2024-12-31T22:00:00.000Z",
+        "firstLoginAt": "2024-12-31T22:00:00.000Z",
+        "lastRenewedAt": "2024-12-31T23:59:59.999Z",
+        "expiresAt": "2025-01-01T01:00:00.000Z",
+        "revokedAt": null,
+        "transport": "browser"
+      },
+      null,
+      {
+        "idleTimeoutSeconds": 3600,
+        "absoluteLifetimeSeconds": 3600
+      },
+      1735689600000
+    ],
+    "expected": {
+      "firstLoginAt": 1735682400000,
+      "expiresAt": 1735686000000,
+      "expired": true,
+      "renew": false
+    }
+  },
+  {
+    "name": "revoked",
+    "rule": "sessionState",
+    "args": [
+      {
+        "createdAt": "2024-12-31T22:00:00.000Z",
+        "firstLoginAt": "2024-12-31T22:00:00.000Z",
+        "lastRenewedAt": "2024-12-31T23:59:59.999Z",
+        "expiresAt": "2025-01-01T01:00:00.000Z",
+        "revokedAt": "2024-12-31T23:59:59.999Z",
+        "transport": "browser"
+      },
+      null,
+      {
+        "idleTimeoutSeconds": 3600,
+        "absoluteLifetimeSeconds": 0
+      },
+      1735689600000
+    ],
+    "expected": {
+      "firstLoginAt": 1735682400000,
+      "expiresAt": 1735693199999,
+      "expired": true,
+      "renew": false
+    }
+  },
+  {
+    "name": "native-legacy",
+    "rule": "sessionState",
+    "args": [
+      {
+        "createdAt": "2024-12-31T22:00:00.000Z",
+        "firstLoginAt": null,
+        "lastRenewedAt": null,
+        "expiresAt": "2025-01-01T01:00:00.000Z",
+        "revokedAt": null,
+        "transport": "native"
+      },
+      {
+        "createdAt": "2024-12-31T23:00:00.000Z",
+        "expiresAt": "2025-01-01T01:00:00.000Z"
+      },
+      {
+        "idleTimeoutSeconds": 3600,
+        "absoluteLifetimeSeconds": 0
+      },
+      1735689599999
+    ],
+    "expected": {
+      "firstLoginAt": 1735682400000,
+      "expiresAt": 1735689600000,
+      "expired": false,
+      "renew": false
+    }
+  },
+  {
+    "name": "native-stored-expiry",
+    "rule": "sessionState",
+    "args": [
+      {
+        "createdAt": "2024-12-31T22:00:00.000Z",
+        "firstLoginAt": "2024-12-31T22:00:00.000Z",
+        "lastRenewedAt": "2024-12-31T23:59:59.999Z",
+        "expiresAt": "2025-01-01T01:00:00.000Z",
+        "revokedAt": null,
+        "transport": "native"
+      },
+      {
+        "createdAt": "2024-12-31T23:59:59.999Z",
+        "expiresAt": "2025-01-01T00:00:00.000Z"
+      },
+      {
+        "idleTimeoutSeconds": 3600,
+        "absoluteLifetimeSeconds": 0
+      },
+      1735689600000
+    ],
+    "expected": {
+      "firstLoginAt": 1735682400000,
+      "expiresAt": 1735689600000,
+      "expired": true,
+      "renew": false
+    }
+  },
+  {
+    "name": "native-live",
+    "rule": "sessionState",
+    "args": [
+      {
+        "createdAt": "2024-12-31T22:00:00.000Z",
+        "firstLoginAt": "2024-12-31T22:00:00.000Z",
+        "lastRenewedAt": "2024-12-31T23:59:59.999Z",
+        "expiresAt": "2025-01-01T01:00:00.000Z",
+        "revokedAt": null,
+        "transport": "native"
+      },
+      {
+        "createdAt": "2024-12-31T23:59:59.999Z",
+        "expiresAt": "2025-01-01T01:00:00.000Z"
+      },
+      {
+        "idleTimeoutSeconds": 3600,
+        "absoluteLifetimeSeconds": 0
+      },
+      1735689600000
+    ],
+    "expected": {
+      "firstLoginAt": 1735682400000,
+      "expiresAt": 1735693199999,
+      "expired": false,
+      "renew": false
+    }
+  },
+  {
+    "name": "default-policy",
+    "rule": "sessionPolicy",
+    "args": [],
+    "expected": {
+      "idleTimeoutSeconds": 2592000,
+      "absoluteLifetimeSeconds": 0
+    }
+  },
+  {
+    "name": "invalid-policy",
+    "rule": "sessionPolicy",
+    "args": [
+      {
+        "idleTimeoutSeconds": 3599
+      }
+    ],
+    "error": {
+      "message": "auth.session.idle_timeout_seconds must be an integer between 3600 and 31536000 seconds."
+    }
+  },
+  {
+    "name": "uncapped-expiry",
+    "rule": "sessionExpiry",
+    "args": [
+      {
+        "idleTimeoutSeconds": 3600,
+        "absoluteLifetimeSeconds": 0
+      },
+      1735682400000,
+      1735689600000
+    ],
+    "expected": 1735693200000
+  },
+  {
+    "name": "absolute-expiry",
+    "rule": "sessionExpiry",
+    "args": [
+      {
+        "idleTimeoutSeconds": 3600,
+        "absoluteLifetimeSeconds": 3600
+      },
+      1735682400000,
+      1735689600000
+    ],
+    "expected": 1735686000000
+  },
+  {
+    "name": "cookie-uncapped",
+    "rule": "cookieMaxAge",
+    "args": [
+      {
+        "idleTimeoutSeconds": 3600,
+        "absoluteLifetimeSeconds": 0
+      },
+      1735689600000,
+      1735689600000
+    ],
+    "expected": 34560000
+  },
+  {
+    "name": "cookie-boundary",
+    "rule": "cookieMaxAge",
+    "args": [
+      {
+        "idleTimeoutSeconds": 3600,
+        "absoluteLifetimeSeconds": 3600
+      },
+      1735686000000,
+      1735689600000
+    ],
+    "expected": 0
+  },
+  {
+    "name": "cleanup-idle",
+    "rule": "cleanupCandidates",
+    "args": [
+      {
+        "idleTimeoutSeconds": 3600,
+        "absoluteLifetimeSeconds": 0
+      },
+      1735689600000
+    ],
+    "expected": {
+      "cutoff": "2025-01-01T00:00:00.000Z",
+      "idleCutoff": "2024-12-31T23:00:00.000Z",
+      "legacyCutoff": "2024-12-25T00:00:00.000Z"
+    }
+  },
+  {
+    "name": "cleanup-absolute",
+    "rule": "cleanupCandidates",
+    "args": [
+      {
+        "idleTimeoutSeconds": 3600,
+        "absoluteLifetimeSeconds": 7200
+      },
+      1735689600000
+    ],
+    "expected": {
+      "cutoff": "2025-01-01T00:00:00.000Z",
+      "idleCutoff": "2024-12-31T23:00:00.000Z",
+      "legacyCutoff": "2024-12-25T00:00:00.000Z",
+      "absoluteCutoff": "2024-12-31T22:00:00.000Z"
+    }
+  },
+  {
+    "name": "keyset-start",
+    "rule": "cleanupPage",
+    "args": [
+      "00000000-0000-4000-8000-000000000000",
+      false,
+      0,
+      2
+    ],
+    "expected": {
+      "start": "00000000-0000-4000-8000-000000000000",
+      "wrap": false,
+      "limit": 2
+    }
+  },
+  {
+    "name": "keyset-wrap",
+    "rule": "cleanupPage",
+    "args": [
+      "00000000-0000-4000-8000-000000000000",
+      true,
+      1,
+      2
+    ],
+    "expected": {
+      "start": "00000000-0000-4000-8000-000000000000",
+      "wrap": true,
+      "limit": 1
+    }
+  },
+  {
+    "name": "email-normalized",
+    "rule": "normalizeEmail",
+    "args": [
+      " User@Example.test "
+    ],
+    "expected": "user@example.test"
+  },
+  {
+    "name": "email-invalid",
+    "rule": "normalizeEmail",
+    "args": [
+      "broken"
+    ],
+    "error": {
+      "code": "invalid_input",
+      "status": 400
+    }
+  },
+  {
+    "name": "rate-active",
+    "rule": "nextRateLimit",
+    "args": [
+      {
+        "attemptCount": 1,
+        "expiresAt": "2025-01-01T01:00:00.000Z"
+      },
+      "2025-01-01T02:00:00.000Z",
+      10,
+      1735689600000
+    ],
+    "expected": {
+      "attemptCount": 2,
+      "expiresAt": "2025-01-01T01:00:00.000Z"
+    }
+  },
+  {
+    "name": "rate-boundary",
+    "rule": "nextRateLimit",
+    "args": [
+      {
+        "attemptCount": 10,
+        "expiresAt": "2025-01-01T00:00:00.000Z"
+      },
+      "2025-01-01T01:00:00.000Z",
+      10,
+      1735689600000
+    ],
+    "expected": {
+      "attemptCount": 1,
+      "expiresAt": "2025-01-01T01:00:00.000Z"
+    }
+  },
+  {
+    "name": "rate-max",
+    "rule": "nextRateLimit",
+    "args": [
+      {
+        "attemptCount": 10,
+        "expiresAt": "2025-01-01T01:00:00.000Z"
+      },
+      "2025-01-01T02:00:00.000Z",
+      10,
+      1735689600000
+    ],
+    "error": {
+      "code": "rate_limited",
+      "status": 429
+    }
+  },
+  {
+    "name": "password-too-short",
+    "rule": "validatePassword",
+    "args": [
+      "xxxxxxxxxxxxxx"
+    ],
+    "error": {
+      "code": "invalid_input",
+      "status": 400
+    }
+  },
+  {
+    "name": "password-minimum",
+    "rule": "validatePassword",
+    "args": [
+      "xxxxxxxxxxxxxxx"
+    ],
+    "expected": null
+  },
+  {
+    "name": "password-utf8-limit",
+    "rule": "validatePassword",
+    "args": [
+      "\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00"
+    ],
+    "error": {
+      "code": "invalid_input",
+      "status": 400
+    }
+  },
+  {
+    "name": "password-utf8-boundary",
+    "rule": "validatePassword",
+    "args": [
+      "\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00"
+    ],
+    "expected": null
+  },
+  {
+    "name": "token-invalid",
+    "rule": "validateToken",
+    "args": [
+      "malformed-test-value"
+    ],
+    "error": {
+      "code": "invalid_token",
+      "status": 401
+    }
+  },
+  {
+    "name": "token-format",
+    "rule": "validateToken",
+    "args": [
+      "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    ],
+    "expected": null
+  }
+]
