@@ -39,7 +39,7 @@ try {
   const authenticatedRequest = req({...browserRequestHeaders, cookie});
   const context = {...browserRequest(authenticatedRequest, options.projectId, origins), headers: new Headers()};
   const wireBrowser = await invokeAuth(open, "auth.session", {}, authenticatedRequest, context);
-  assert.deepEqual(Object.keys(wireBrowser).sort(), ["email", "expires_at", "id", "session_id"]);
+  assert.deepEqual(Object.keys(wireBrowser).sort(), ["email", "email_verified", "expires_at", "id", "session_id"]);
   assert.ok(!JSON.stringify(wireBrowser).includes(browser.credential));
   assert.equal(context.headers.has("set-cookie"), false);
   for (const headers of [ {...browserRequestHeaders, origin: "https://evil.example.test", cookie},
@@ -111,13 +111,14 @@ try {
 
   const rollback = new Auth(port, [], now, {...hooks, async creating() { throw new Error("private hook failure"); }}, options);
   await rejects(rollback.signup(invitation.email, password, invitation.code), "user_creation_failed");
+  assert.deepEqual(logs.splice(0), [[JSON.stringify({cause: "user_creation_failed"})]]);
   assert.ok((await db.appAuthInvites.findById({id: invitation.id})).redeemedAt === null);
   const recipient = await closed.signup(" RECIPIENT@example.test ", password, invitation.code);
   await rejects(closed.signup(invitation.email, password, invitation.code), "invite_invalid");
   await rejects(closed.inviteRevoke(owner.accessToken, invitation.id), "invite_already_redeemed");
   assert.ok((await closed.session(recipient.accessToken)).id === recipient.userId);
   assert.equal((await db.appAuthUsers.findById({id: recipient.userId})).email, invitation.email);
-  assert.ok(!("emailVerifiedAt" in await db.appAuthUsers.findById({id: recipient.userId})));
+  assert.equal((await db.appAuthUsers.findById({id: recipient.userId})).emailVerifiedAt, null);
 
   const revoked = await issue("revoked@example.test");
   assert.equal((await closed.inviteRevoke(owner.accessToken, revoked.id)).status, "revoked");

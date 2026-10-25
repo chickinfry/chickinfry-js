@@ -4,15 +4,18 @@ import { createStore, encodeTimestampValue, cleanupBudgetMillis, type DatabasePo
 import type { Store } from "./core/store.js";
 import { Flows } from "./core/flows.js";
 import { AuthError } from "./core/errors.js";
-import { normalizeEmail, validateToken, cleanupCandidates, cleanupPage, type SessionPolicy } from "./core/rules.js";
+import { normalizeEmail, validateToken, cleanupCandidates, cleanupPage, emailPolicy, signupPolicy, emailLinkBase, renderAuthMail, type SessionPolicy } from "./core/rules.js";
 import { coreVersion } from "./core/version.js";
-import type { Tokens, BrowserSession, IdentityProvider, AuthUser, AuthActor, AuthOptions, SessionTransport, InviteSummary } from "./core/types.js";
+import type { Tokens, BrowserSession, IdentityProvider, AuthUser, AuthActor, AuthOptions, SessionTransport, InviteSummary,
+  AuthMailer, AuthMail, ActionTokenKind, Accepted, SignupAttempt, SignupHookResult } from "./core/types.js";
 
 export { AuthError, normalizeEmail };
-export type { SessionPolicy, Tokens, BrowserSession, IdentityProvider, AuthUser, AuthActor, AuthOptions, SessionTransport, InviteSummary };
+export type { SessionPolicy, Tokens, BrowserSession, IdentityProvider, AuthUser, AuthActor, AuthOptions, SessionTransport, InviteSummary,
+  AuthMailer, AuthMail, ActionTokenKind, Accepted, SignupAttempt, SignupHookResult };
 
 export interface UserCreationHooks {
-  creating?(transaction: DatabasePort, user: AuthUser): Promise<void>;
+  checkSignup?(input: Readonly<{email: string}>): SignupHookResult | Promise<SignupHookResult>;
+  creating?(transaction: DatabasePort, user: AuthUser): Promise<SignupHookResult>;
   committed?(user: AuthUser): Promise<void>;
   inviteManaging?(transaction: DatabasePort, actor: AuthActor, projectId: string): Promise<void>;
 }
@@ -41,15 +44,38 @@ export class Auth {
     private readonly options: AuthOptions = {},
     private readonly cleanupContext?: AuthCleanupContext,
   ) {
+    if (options.email !== undefined && (options.email === null || typeof options.email !== "object" ||
+      (options.email.verification !== "required" && options.email.verification !== "off"))) {
+      throw new Error("auth.email.verification must be required or off.");
+    }
+    if (options.email?.verification === "required" && !options.mailer) throw new Error("Verified email requires an AuthMailer.");
+    if (options.mailer) {
+      if (typeof options.mailer.send !== "function") throw new Error("AuthMailer must implement send.");
+      emailLinkBase(options.emailLinkBase);
+    }
+    if (options.projectName !== undefined && (typeof options.projectName !== "string" ||
+      !options.projectName.trim() || options.projectName.length > 200 || /[\r\n\0]/.test(options.projectName))) {
+      throw new Error("Auth project name must be a nonempty single line.");
+    }
     this.db = createStore(port);
     this.flows = new Flows(this.db, providers, () => this.now(), options);
     this.policy = this.flows.policy;
   }
 
-  async signup(email: string, password: string, inviteCode?: string, transport?: "native"): Promise<Tokens>;
-  async signup(email: string, password: string, inviteCode: string, transport: "browser", previousCredential?: string): Promise<BrowserSession>;
-  async signup(email: string, password: string, inviteCode = "", transport: SessionTransport = "native", previousCredential = ""): Promise<Tokens | BrowserSession> {
-    const prepared = await this.flows.prepareSignup(email, password, inviteCode);
+  async signup(email: string, password: string, inviteCode?: string, transport?: "native", previousCredential?: string, callerIp?: string): Promise<Tokens | SignupAttempt>;
+  async signup(email: string, password: string, inviteCode: string, transport: "browser", previousCredential?: string, callerIp?: string): Promise<BrowserSession | SignupAttempt>;
+  async signup(email: string, password: string, inviteCode = "", transport: SessionTransport = "native", previousCredential = "", callerIp?: string): Promise<Tokens | BrowserSession | SignupAttempt> {
+    const started = performance.now();
+    if (this.options.email?.verification === "required") {
+      email = normalizeEmail(email);
+      await this.checkSignup(email);
+    }
+    const prepared = await this.flows.prepareSignup(email, password, inviteCode, callerIp);
+    if (this.options.email?.verification === "required") {
+      const result = await this.signupWithEmail(prepared);
+      await this.acceptedAfter(started);
+      return result;
+    }
     let created: AuthUser | undefined;
     let tokens: Tokens | BrowserSession;
     try {
@@ -68,12 +94,133 @@ export class Auth {
     return tokens;
   }
 
-  async signin(email: string, password: string, transport?: "native"): Promise<Tokens>;
-  async signin(email: string, password: string, transport: "browser", previousCredential?: string): Promise<BrowserSession>;
-  async signin(email: string, password: string, transport: SessionTransport = "native", previousCredential = ""): Promise<Tokens | BrowserSession> {
-    const user = await this.flows.prepareSignin(email, password);
-    const tokens = await this.port.transaction(port => this.flows.commitSignin(createStore(port), user, transport, previousCredential));
+  private async signupWithEmail(prepared: Awaited<ReturnType<Flows["prepareSignup"]>>): Promise<SignupAttempt> {
+    const attempt = randomUUID();
+    const mail = await this.port.transaction(port => this.flows.commitEmailSignup(createStore(port), {...prepared, attempt}));
+    this.sendMail(mail);
     this.scheduleCleanup();
+    return {accepted: true, attempt};
+  }
+
+  async sendVerificationEmail(target: string | {readonly attempt: string}, callerIp?: string): Promise<Accepted> {
+    if (typeof target === "string") return this.requestMail(target, "email_verification", callerIp);
+    const started = performance.now();
+    if (!this.options.mailer) throw new AuthError("not_found", 404);
+    const attempt = target?.attempt;
+    const row = this.options.email?.verification === "required" && typeof attempt === "string" && uuidPattern.test(attempt) &&
+      Object.keys(target).every(key => key === "attempt") ? await this.db.signup(attempt) : undefined;
+    if (!row) return this.acceptedAfter(started);
+    return this.requestMail(row.email, "email_verification", callerIp, row.id, started);
+  }
+
+  async requestPasswordReset(email: string, callerIp?: string): Promise<Accepted> {
+    return this.requestMail(email, "password_reset", callerIp);
+  }
+
+  private async requestMail(email: string, kind: ActionTokenKind, callerIp?: string, attempt?: string, started = performance.now()): Promise<Accepted> {
+    if (!this.options.mailer) throw new AuthError("not_found", 404);
+    const prepared = await this.flows.prepareMail(email, kind, callerIp, attempt);
+    const mail = await this.port.transaction(port => this.flows.commitMail(createStore(port), prepared, kind));
+    this.sendMail(mail);
+    this.scheduleCleanup();
+    return this.acceptedAfter(started);
+  }
+
+  async verifyEmail(target: string | {readonly attempt: string}, code: string, transport?: "native", previousCredential?: string): Promise<Tokens>;
+  async verifyEmail(target: string | {readonly attempt: string}, code: string, transport: "browser", previousCredential?: string): Promise<BrowserSession>;
+  async verifyEmail(target: string | {readonly attempt: string}, code: string, transport: SessionTransport = "native", previousCredential = ""): Promise<Tokens | BrowserSession> {
+    if (!this.options.mailer) throw new AuthError("not_found", 404);
+    let email = "";
+    const attempt = typeof target === "object" && target !== null ? target.attempt : undefined;
+    if (typeof target === "string") {
+      try { email = normalizeEmail(target); }
+      catch { throw new AuthError(emailPolicy.invalidCode, 400); }
+    } else if (typeof attempt !== "string" || !uuidPattern.test(attempt) || Object.keys(target).some(key => key !== "attempt")) {
+      throw new AuthError(emailPolicy.invalidCode, 400);
+    }
+    if (typeof code !== "string" || !/^[0-9]{6}$/.test(code)) throw new AuthError(emailPolicy.invalidCode, 400);
+    const signup = attempt !== undefined && this.options.email?.verification === "required" ? await this.db.signup(attempt) : undefined;
+    if (attempt !== undefined && !signup) throw new AuthError(emailPolicy.invalidCode, 400);
+    let created: AuthUser | undefined;
+    let result;
+    try {
+      result = await this.port.transaction(async port => {
+        const tx = createStore(port);
+        if (!signup) return this.flows.commitVerifyEmail(tx, email, code, transport, previousCredential);
+        return this.flows.commitSignupVerification(tx, signup, code, transport, previousCredential, async user => {
+          await this.creating(port, user);
+          created = user;
+        });
+      });
+    } catch (error) {
+      if (uniqueViolation(error)) throw new AuthError(emailPolicy.invalidCode, 400);
+      throw error;
+    }
+    // An invalid code must commit its failed attempt before returning an error.
+    if (!result) throw new AuthError(emailPolicy.invalidCode, 400);
+    if (created) await this.created(created);
+    this.scheduleCleanup();
+    return result;
+  }
+
+  private async acceptedAfter(started: number): Promise<Accepted> {
+    const remaining = 1000 - (performance.now() - started);
+    if (remaining > 0) await new Promise(resolve => setTimeout(resolve, Math.ceil(remaining)));
+    return emailPolicy.accepted;
+  }
+
+  private async checkSignup(email: string): Promise<void> {
+    const hook = this.hooks.checkSignup;
+    if (!hook) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let message;
+    const started = performance.now();
+    try {
+      const result = await Promise.race([
+        Promise.resolve().then(() => hook.call(this.hooks, Object.freeze({email}))),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error()), signupHookBudgetMillis); }),
+      ]);
+      if (performance.now() - started >= signupHookBudgetMillis) throw new Error();
+      message = signupRejection(result);
+    } catch {
+      try { console.error(JSON.stringify({cause: "signup_check_failed"})); } catch {}
+      throw new AuthError(signupPolicy.checkFailedCode, 500);
+    }
+    finally { clearTimeout(timer); }
+    if (message !== undefined) throw publicRejection(signupPolicy.rejectedCode, 400, message);
+  }
+
+  async resetPassword(token: string, password: string): Promise<Accepted> {
+    if (!this.options.mailer) throw new AuthError("not_found", 404);
+    const prepared = await this.flows.preparePasswordReset(token, password);
+    await this.port.transaction(port => this.flows.commitPasswordReset(createStore(port), prepared));
+    this.scheduleCleanup();
+    return emailPolicy.accepted;
+  }
+
+  private sendMail(pending: {to: string; kind: AuthMail["kind"]; token: string; signup?: boolean} | undefined): void {
+    if (!pending) return;
+    const mailer = this.options.mailer!;
+    const work = Promise.resolve().then(() => mailer.send({to: pending.to, kind: pending.kind,
+      ...renderAuthMail(pending.kind, this.options.projectName ?? "Application", emailLinkBase(this.options.emailLinkBase), pending.token, pending.signup),
+    })).catch(() => {
+      try { console.error(JSON.stringify({cause: "auth_mail_failed", kind: pending.kind})); } catch {}
+    });
+    try { this.cleanupContext?.waitUntil(work); } catch {}
+  }
+
+  async signin(email: string, password: string, transport?: "native", previousCredential?: string, callerIp?: string): Promise<Tokens>;
+  async signin(email: string, password: string, transport: "browser", previousCredential?: string, callerIp?: string): Promise<BrowserSession>;
+  async signin(email: string, password: string, transport: SessionTransport = "native", previousCredential = "", callerIp?: string): Promise<Tokens | BrowserSession> {
+    const started = performance.now();
+    const prepared = await this.flows.prepareSignin(email, password, callerIp);
+    const {tokens, mail} = await this.port.transaction(port => this.flows.commitSignin(createStore(port), prepared, transport, previousCredential));
+    this.sendMail(mail);
+    this.scheduleCleanup();
+    if (!tokens) {
+      await this.acceptedAfter(started);
+      throw new AuthError(emailPolicy.unverifiedCode, emailPolicy.unverifiedStatus);
+    }
     return tokens;
   }
 
@@ -199,6 +346,7 @@ export class Auth {
       transaction() { throw new Error("Nested transactions are not supported."); },
     };
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let rejection: string | undefined;
     try {
       const original = await Promise.race([
         new Promise<never>((_, reject) => { timer = setTimeout(() => reject(expire()), signupHookBudgetMillis); }),
@@ -206,7 +354,7 @@ export class Auth {
           const [settings] = await port.query("select current_setting('lock_timeout') as lock_timeout, current_setting('statement_timeout') as statement_timeout", []);
           await limits();
           remaining();
-          await hook.call(this.hooks, lease, user);
+          rejection = signupRejection(await hook.call(this.hooks, lease, user));
           await pending;
           remaining();
           return settings;
@@ -216,11 +364,17 @@ export class Auth {
       clearTimeout(timer);
       await port.query("select set_config('lock_timeout', $1, true), set_config('statement_timeout', $2, true)",
         [original.lock_timeout, original.statement_timeout]);
-    } catch { throw new AuthError("user_creation_failed", 500); }
+    } catch {
+      if (!timedOut) {
+        try { console.error(JSON.stringify({cause: "user_creation_failed"})); } catch {}
+      }
+      throw new AuthError("user_creation_failed", 500);
+    }
     finally { active = false; clearTimeout(timer); }
+    if (rejection !== undefined) throw publicRejection(signupPolicy.creationRejectedCode, 422, rejection);
   }
 
-  async session(accessToken: string, transport: SessionTransport = "native"): Promise<{ id: string; email: string; sessionId: string; expiresAt: string }> {
+  async session(accessToken: string, transport: SessionTransport = "native"): Promise<{ id: string; email: string; sessionId: string; expiresAt: string; emailVerified: boolean }> {
     validateToken(accessToken);
     const result = await this.port.transaction(port => this.flows.commitSession(createStore(port), accessToken, transport));
     if (!result) throw new AuthError("invalid_token", 401);
@@ -228,7 +382,7 @@ export class Auth {
   }
 
   /** Revalidates an already authenticated native connection; session IDs cannot establish a login. */
-  async revalidateSession(sessionId: string, userId: string): Promise<{ id: string; email: string; sessionId: string; expiresAt: string }> {
+  async revalidateSession(sessionId: string, userId: string): Promise<{ id: string; email: string; sessionId: string; expiresAt: string; emailVerified: boolean }> {
     const result = await this.port.transaction(port => this.flows.commitRevalidateSession(createStore(port), sessionId, userId));
     if (!result) throw new AuthError("invalid_token", 401);
     return result;
@@ -267,7 +421,10 @@ export class Auth {
       try {
         port = context.createPort(controller.signal);
         const db = createStore(port);
-        if (invitesOnly) await this.cleanupInvites(db, controller.signal);
+        if (invitesOnly) {
+          await this.cleanupSignupRequests(db, controller.signal);
+          if (!controller.signal.aborted) await this.cleanupInvites(db, controller.signal);
+        }
         else await this.cleanup(db, controller.signal);
       } finally {
         try { await port?.close(); }
@@ -308,7 +465,20 @@ export class Auth {
     } catch {
       cleanupFailure(stage);
     }
+    if (!signal.aborted) await this.cleanupSignupRequests(db, signal);
     if (!signal.aborted) await this.cleanupInvites(db, signal);
+    if (!signal.aborted && this.options.mailer) {
+      try {
+        const cutoff = this.timestamp();
+        for (const consumed of [true, false]) {
+          const rows = consumed ? await db.consumedActionTokens(cleanupLimit) : await db.expiredActionTokens(cutoff, cleanupLimit);
+          for (const row of rows) {
+            signal.throwIfAborted();
+            await db.transaction(tx => tx.deleteExpiredActionToken(row, cutoff));
+          }
+        }
+      } catch { cleanupFailure("action_token"); }
+    }
   }
 
   private async cleanupInvites(db: RuntimeStore, signal: AbortSignal): Promise<void> {
@@ -317,12 +487,51 @@ export class Auth {
       const cutoff = new Date(this.now() - 30 * day).toISOString();
       const candidates = await db.expiredInvites(cutoff, cleanupLimit);
       for (const row of candidates) await db.transaction(tx => this.flows.commitCleanupInvite(tx, row, cutoff));
-    } catch {
+    } catch (error) {
+      // A bounded signup pass may not yet have reached every invite reference.
+      if (typeof error === "object" && error !== null && "code" in error && error.code === "23503") return;
       cleanupFailure("invite");
     }
   }
 
+  private async cleanupSignupRequests(db: RuntimeStore, signal: AbortSignal): Promise<void> {
+    try {
+      signal.throwIfAborted();
+      const cutoff = this.timestamp();
+      for (const row of await db.expiredSignupRequests(cutoff, cleanupLimit)) {
+        signal.throwIfAborted();
+        await db.transaction(tx => tx.deleteExpiredSignupRequest(row, cutoff));
+      }
+    } catch (error) {
+      // Off mode may still use the earlier email schema without pending signup storage.
+      if (this.options.email?.verification !== "required" && typeof error === "object" && error !== null &&
+        "code" in error && error.code === "42P01") return;
+      cleanupFailure("signup_request");
+    }
+  }
+
   private timestamp(): string { return new Date(this.now()).toISOString(); }
+}
+
+function signupRejection(result: unknown): string | undefined {
+  if (result === undefined) return undefined;
+  if (typeof result !== "object" || result === null || Array.isArray(result) || !Object.hasOwn(result, "reject")) throw new Error();
+  const message = (result as {reject: unknown}).reject;
+  if (typeof message !== "string") throw new Error();
+  const trimmed = message.trim();
+  if (trimmed.length === 0 || [...trimmed].length > 200) throw new Error();
+  return trimmed;
+}
+
+function publicRejection(code: string, status: number, message: string): AuthError {
+  const error = new AuthError(code, status);
+  error.message = message;
+  return error;
+}
+
+/** Prints authentication mail locally; never use this mailer in production. */
+export function developmentAuthMailer(log: (text: string) => void = console.info): AuthMailer {
+  return {async send(message) { log(message.text); }};
 }
 
 function cleanupFailure(stage: string): void {

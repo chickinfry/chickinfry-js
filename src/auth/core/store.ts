@@ -49,17 +49,63 @@ export interface AppAuthSessionsRow {
 export interface AppAuthUsersRow {
   readonly createdAt: string;
   readonly disabledAt: string | null;
+  readonly emailVerifiedAt: string | null;
   readonly email: string;
   readonly id: string;
   readonly passwordHash: string | null;
   readonly sessionVersion: number;
 }
 
+export interface AppAuthActionTokensRow {
+  readonly id: string;
+  readonly userId: string;
+  readonly kind: string;
+  readonly tokenHash: string;
+  readonly expiresAt: string;
+  readonly consumedAt: string | null;
+  readonly createdAt: string;
+  readonly attempts: number;
+}
+
+export interface AppAuthSignupRequestsRow {
+  readonly id: string;
+  readonly email: string;
+  readonly passwordHash: string;
+  readonly codeHash: string;
+  readonly codeExpiresAt: string;
+  readonly inviteId: string | null;
+  readonly expiresAt: string;
+  readonly attempts: number;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
 export interface Store {
+  signup(id: string): Promise<AppAuthSignupRequestsRow | undefined>;
+  signupsByEmail(email: string): Promise<AppAuthSignupRequestsRow[]>;
+  lockSignupEmail(keyHash: string, expiresAt: string): Promise<void>;
+  saveSignup(values: AppAuthSignupRequestsRow): Promise<void>;
+  lockSignup(row: AppAuthSignupRequestsRow, at: string): Promise<AppAuthSignupRequestsRow | undefined>;
+  renewSignup(row: AppAuthSignupRequestsRow, codeHash: string, codeExpiresAt: string, at: string): Promise<AppAuthSignupRequestsRow | undefined>;
+  failSignupCode(row: AppAuthSignupRequestsRow): Promise<void>;
+  deleteSignup(id: string): Promise<void>;
+  expiredSignupRequests(cutoff: string, limit: number): Promise<AppAuthSignupRequestsRow[]>;
+  deleteExpiredSignupRequest(row: AppAuthSignupRequestsRow, cutoff: string): Promise<void>;
   user(id: string): Promise<AppAuthUsersRow | undefined>;
   userByEmail(email: string): Promise<AppAuthUsersRow | undefined>;
   createUser(email: string, passwordHash: string | null): Promise<AppAuthUsersRow>;
   lockUser(id: string, version: number): Promise<AppAuthUsersRow | undefined>;
+  markEmailVerified(userId: string, at: string): Promise<void>;
+  resetPassword(userId: string, passwordHash: string): Promise<void>;
+  actionByToken(hash: string, kind: string): Promise<AppAuthActionTokensRow | undefined>;
+  failActionCode(row: AppAuthActionTokensRow): Promise<void>;
+  liveActionToken(userId: string, kind: string, at: string): Promise<AppAuthActionTokensRow | undefined>;
+  createActionToken(values: Omit<AppAuthActionTokensRow, "id" | "consumedAt" | "attempts">): Promise<AppAuthActionTokensRow>;
+  invalidateActionTokens(userId: string, kind: string, at: string): Promise<void>;
+  consumeActionToken(id: string, kind: string, at: string): Promise<AppAuthActionTokensRow | undefined>;
+  consumedActionTokens(limit: number): Promise<AppAuthActionTokensRow[]>;
+  expiredActionTokens(cutoff: string, limit: number): Promise<AppAuthActionTokensRow[]>;
+  deleteExpiredActionToken(row: AppAuthActionTokensRow, cutoff: string): Promise<void>;
   identity(provider: string, subject: string): Promise<AppAuthIdentitiesRow | undefined>;
   createIdentity(provider: string, subject: string, userId: string): Promise<AppAuthIdentitiesRow>;
   session(id: string): Promise<AppAuthSessionsRow | undefined>;
@@ -89,7 +135,7 @@ export interface Store {
   deleteInvite(id: string): Promise<void>;
   rateLimit(key: RateKey): Promise<AppAuthRateLimitsRow | undefined>;
   createRateLimit(values: AppAuthRateLimitsRow): Promise<AppAuthRateLimitsRow>;
-  updateRateLimit(row: AppAuthRateLimitsRow, values: RateState): Promise<AppAuthRateLimitsRow | undefined>;
+  updateRateLimit(row: AppAuthRateLimitsRow, values: RateState, maximum: number): Promise<AppAuthRateLimitsRow | undefined>;
   expiredRateLimits(cutoff: string, limit: number): Promise<AppAuthRateLimitsRow[]>;
   lockRateLimit(row: AppAuthRateLimitsRow, cutoff: string): Promise<AppAuthRateLimitsRow | undefined>;
   deleteRateLimit(key: RateKey): Promise<void>;

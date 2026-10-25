@@ -1,7 +1,8 @@
-import { Auth, AuthError, type Tokens, type InviteSummary, type BrowserSession } from "./runtime.js";
+import { Auth, AuthError, type Tokens, type InviteSummary, type BrowserSession, type Accepted } from "./runtime.js";
 
 export const authOperations = ["auth.signup", "auth.signin", "auth.refresh", "auth.session", "auth.logout", "auth.identity",
-  "auth.invite_issue", "auth.invite_list", "auth.invite_revoke"];
+  "auth.invite_issue", "auth.invite_list", "auth.invite_revoke",
+  "auth.send_verification_email", "auth.verify_email", "auth.request_password_reset", "auth.reset_password"];
 
 export function bearer(request: Request): string {
   const match = /^Bearer ([A-Za-z0-9_-]{43})$/i.exec(request.headers.get("authorization") ?? "");
@@ -9,7 +10,9 @@ export function bearer(request: Request): string {
   return match[1]!;
 }
 
-export async function invokeAuth(auth: Auth, operation: string, input: unknown, request: Request, browser?: BrowserRequest & {headers: Headers}): Promise<unknown> {
+/** callerIp comes from the trusted host connection, never from client forwarding headers. */
+export async function invokeAuth(auth: Auth, operation: string, input: unknown, request: Request,
+  browser?: BrowserRequest & {headers: Headers}, callerIp?: string): Promise<unknown> {
   const removed = /^auth\.browser_(signup|signin|identity|session|logout)$/.exec(operation);
   if (removed) {
     const error = new AuthError("auth_operation_removed", 400);
@@ -28,11 +31,29 @@ export async function invokeAuth(auth: Auth, operation: string, input: unknown, 
     if (!request.headers.has("authorization")) throw new AuthError("unauthenticated", 401);
     return bearer(request);
   };
+  switch (operation) {
+    case "auth.send_verification_email": return auth.sendVerificationEmail(
+      Object.hasOwn(value, "attempt") ? {attempt: !Object.hasOwn(value, "email") ? text("attempt") : ""} : text("email"), callerIp);
+    case "auth.request_password_reset": return auth.requestPasswordReset(text("email"), callerIp);
+    case "auth.verify_email": {
+      const target = Object.hasOwn(value, "attempt")
+        ? {attempt: typeof value.attempt === "string" && !Object.hasOwn(value, "email") ? value.attempt : ""}
+        : typeof value.email === "string" ? value.email : "";
+      const code = typeof value.code === "string" ? value.code : "";
+      if (!browser) {
+        return tokens(await auth.verifyEmail(target, code));
+      }
+      const result = await auth.verifyEmail(target, code, "browser", browser.credential);
+      browser.headers.set("set-cookie", browserCookie(browser.cookieName, result.credential, result.cookieMaxAge));
+      return browserInfo(result);
+    }
+    case "auth.reset_password": return auth.resetPassword(typeof value.token === "string" ? value.token : "", text("password"));
+  }
   if (browser && !operation.startsWith("auth.invite_")) {
-    let result: BrowserSession;
+    let result: BrowserSession | Accepted;
     switch (operation) {
-      case "auth.signup": result = await auth.signup(text("email"), text("password"), inviteCode(), "browser", browser.credential); break;
-      case "auth.signin": result = await auth.signin(text("email"), text("password"), "browser", browser.credential); break;
+      case "auth.signup": result = await auth.signup(text("email"), text("password"), inviteCode(), "browser", browser.credential, callerIp); break;
+      case "auth.signin": result = await auth.signin(text("email"), text("password"), "browser", browser.credential, callerIp); break;
       case "auth.identity": result = await auth.signinIdentity(text("provider"), value.credential, inviteCode(), "browser", browser.credential); break;
       case "auth.session": return browserInfo(await auth.session(browser.credential, "browser"));
       case "auth.logout":
@@ -42,12 +63,16 @@ export async function invokeAuth(auth: Auth, operation: string, input: unknown, 
       case "auth.refresh": throw new AuthError("invalid_input", 400);
       default: throw new AuthError("not_found", 404);
     }
+    if ("accepted" in result) return result;
     browser.headers.set("set-cookie", browserCookie(browser.cookieName, result.credential, result.cookieMaxAge));
     return browserInfo(result);
   }
   switch (operation) {
-    case "auth.signup": return tokens(await auth.signup(text("email"), text("password"), inviteCode()));
-    case "auth.signin": return tokens(await auth.signin(text("email"), text("password")));
+    case "auth.signup": {
+      const result = await auth.signup(text("email"), text("password"), inviteCode(), "native", "", callerIp);
+      return "accepted" in result ? result : tokens(result);
+    }
+    case "auth.signin": return tokens(await auth.signin(text("email"), text("password"), "native", "", callerIp));
     case "auth.refresh": return tokens(await auth.refresh(text("refresh_token")));
     case "auth.session": {
       const user = await auth.session(bearer(request));
@@ -81,7 +106,7 @@ function summary(value: InviteSummary) {
 function tokens(value: Tokens) {
   return {access_token: value.accessToken, refresh_token: value.refreshToken,
     expires_at: value.expiresAt, refresh_expires_at: value.refreshExpiresAt,
-    user_id: value.userId, session_id: value.sessionId};
+    user_id: value.userId, session_id: value.sessionId, email_verified: value.emailVerified};
 }
 
 export interface BrowserRequest {
@@ -94,7 +119,7 @@ export function browserRequest(request: Request, projectId: string, origins: Rea
   const cookies = (request.headers.get("cookie") ?? "").split(";").map(item => item.trim());
   const marker = request.headers.get("x-chik-browser");
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(projectId)) {
-    if (marker === null && !cookies.some(item => item.split("=", 1)[0]!.startsWith("__Host-chik_session_"))) return undefined;
+    if (marker === null && !cookies.some(item => /^__Host-chik_session_/.test(item.split("=", 1)[0]!))) return undefined;
     throw new AuthError("service_unavailable", 503);
   }
   const cookieName = `__Host-chik_session_${projectId.toLowerCase()}`;
@@ -113,6 +138,6 @@ export function browserCookie(name: string, value: string, maxAge: number): stri
   return `${name}=${value}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=${maxAge}`;
 }
 
-function browserInfo(value: {id: string; email: string; sessionId: string; expiresAt: string}) {
-  return {id: value.id, email: value.email, session_id: value.sessionId, expires_at: value.expiresAt};
+function browserInfo(value: {id: string; email: string; sessionId: string; expiresAt: string; emailVerified: boolean}) {
+  return {id: value.id, email: value.email, session_id: value.sessionId, expires_at: value.expiresAt, email_verified: value.emailVerified};
 }

@@ -208,7 +208,7 @@ test("revalidation retains native identity and checks revoked, expired, disabled
     created_at:"2029-01-01T00:00:00Z", expires_at:"2029-01-02T00:00:00Z", revoked_at:null,
     first_login_at:null, last_renewed_at:null};
   const user = {id:userId, email:"fixture@example.test", session_version:1, created_at:"2029-01-01T00:00:00Z",
-    disabled_at:null, password_hash:null};
+    disabled_at:null, email_verified_at:null, password_hash:null};
   const refresh = {id:"33333333-3333-4333-8333-333333333333", session_id:sessionId, token_hash:"b".repeat(64),
     created_at:session.created_at, expires_at:"2029-01-31T00:00:00Z", consumed_at:null};
   const port = {async query(sql) {

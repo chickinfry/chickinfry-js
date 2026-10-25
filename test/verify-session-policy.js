@@ -13,7 +13,7 @@ const session = {
 const latest = {createdAt: at(now - hour), expiresAt: at(now + day)};
 
 test("canonical browser auth is token-free and removed names reject without fallback", async () => {
-  const user = {id: "user", email: "user@example.test", sessionId: "session", expiresAt: at(now + hour)};
+  const user = {emailVerified: false, id: "user", email: "user@example.test", sessionId: "session", expiresAt: at(now + hour)};
   const result = {...user, credential: "C".repeat(43), cookieMaxAge: 3600};
   const calls = [];
   const auth = {
@@ -25,7 +25,7 @@ test("canonical browser auth is token-free and removed names reject without fall
   };
   const request = new Request("https://api.example.test/auth.session", {method: "POST"});
   const input = {email: user.email, password: "correct horse battery staple", provider: "company", credential: "proof"};
-  const expected = {id: user.id, email: user.email, session_id: user.sessionId, expires_at: user.expiresAt};
+  const expected = {id: user.id, email: user.email, session_id: user.sessionId, expires_at: user.expiresAt, email_verified: false};
   for (const name of ["signup", "signin", "identity", "session", "logout"]) {
     const context = {credential: "P".repeat(43), cookieName: "__Host-chik_session_test", headers: new Headers()};
     const wire = await invokeAuth(auth, "auth." + name, input, request, context);
@@ -33,7 +33,7 @@ test("canonical browser auth is token-free and removed names reject without fall
     assert.ok(calls.at(-1).includes("browser"));
     if (["signup", "signin", "identity"].includes(name)) {
       assert.match(context.headers.get("set-cookie"), /; Path=\/; Secure; HttpOnly; SameSite=Strict; Max-Age=3600$/);
-      assert.equal(calls.at(-1).at(-1), context.credential);
+      assert.ok(calls.at(-1).includes(context.credential));
     } else if (name === "logout") assert.match(context.headers.get("set-cookie"), /Max-Age=0$/);
     else assert.equal(context.headers.has("set-cookie"), false);
     const count = calls.length;
@@ -51,10 +51,10 @@ test("canonical browser auth is token-free and removed names reject without fall
 });
 
 test("native auth.session exposes token-free session expiry", async () => {
-  const user = {id: "user", email: "user@example.test", sessionId: "session", expiresAt: at(now + hour)};
+  const user = {emailVerified: false, id: "user", email: "user@example.test", sessionId: "session", expiresAt: at(now + hour)};
   const request = new Request("https://api.example.test/auth.session", {headers: {authorization: "Bearer " + "A".repeat(43)}});
   assert.deepEqual(await invokeAuth({async session() { return user; }}, "auth.session", {}, request),
-    {id: user.id, email: user.email, session_id: user.sessionId, expires_at: user.expiresAt});
+    {id: user.id, email: user.email, session_id: user.sessionId, expires_at: user.expiresAt, email_verified: false});
 });
 
 test("browser credential mixing rejects before authentication but unrelated cookies preserve bearer", () => {

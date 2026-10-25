@@ -41,7 +41,8 @@ function moduleSpecifiers(text) {
 test("core imports stay inside the core and approved crypto primitives", async () => {
   for (const file of await sources(root)) {
     for (const name of moduleSpecifiers(await readFile(file, "utf8"))) {
-      if (name === "node:crypto" || name === "node:buffer") continue;
+      /** Node URL conversion validates ACE labels on Node and compatible Workers hosts. */
+      if (name === "node:crypto" || name === "node:buffer" || name === "node:url") continue;
       assert.ok(name.startsWith("."), `Forbidden core import: ${relative(root, file)} -> ${name}`);
       const target = resolve(dirname(file), name).replace(/\.js$/, ".ts");
       assert.ok(target.startsWith(root + sep), `Forbidden core import: ${relative(root, file)} -> ${name}`);
@@ -59,7 +60,8 @@ test("core imports stay inside the core and approved crypto primitives", async (
 });
 
 test("core rule vectors are deterministic without an ambient clock", async () => {
-  const cases = JSON.parse(await readFile(join(root, "testdata/rules.json"), "utf8"));
+  const cases = (await Promise.all(["rules.json", "email.json"].map(async file =>
+    JSON.parse(await readFile(join(root, "testdata", file), "utf8"))))).flat();
   const clock = Date.now;
   try {
     Date.now = () => { throw new Error("Ambient clock read by core rules."); };

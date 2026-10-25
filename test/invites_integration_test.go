@@ -2,16 +2,20 @@ package invitations_test
 
 import (
 	"context"
+	"encoding/hex"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/chickinfry/chickinfry/adapters/database/postgresql"
-	"github.com/chickinfry/chickinfry/auth"
+	"github.com/chickinfry/chickinfry/auth/migration"
+	"github.com/jackc/pgx/v5"
 )
 
 func TestInvitationsWithPostgreSQL(t *testing.T) {
@@ -62,16 +66,90 @@ func TestInvitationsWithPostgreSQL(t *testing.T) {
 	} {
 		run("docker", "exec", "-u", "postgres", container, "psql", "-U", "chik", "-d", "chik", "-v", "ON_ERROR_STOP=1", "-c", statement)
 	}
-	if _, err := postgresql.Migrate(t.Context(), connection, auth.Schema()); err != nil {
+	module, err := migration.Load()
+	if err != nil {
 		t.Fatal(err)
 	}
-	for _, script := range []string{"verify-sessions.js", "verify-invites.js", "verify-postgres.js", "verify-signup-hook.js"} {
-		command := exec.CommandContext(t.Context(), "node", filepath.Join(root, "test", script))
-		command.Env = append(os.Environ(), "CHIK_TEST_DATABASE_URL="+connection, "CHIK_TEST_DATABASE_CA="+cert, "CHIK_TEST_DATABASE_KEY="+key)
-		if out, err := command.CombinedOutput(); err != nil {
-			t.Fatalf("%s failed: %v\n%s", script, err, out)
-		} else {
-			t.Log(strings.TrimSpace(string(out)))
+	conn, err := pgx.Connect(t.Context(), connection)
+	if err != nil {
+		t.Fatal("cannot connect to the disposable authentication database")
+	}
+	defer conn.Close(context.Background())
+	for _, feature := range []string{"core", "email_verification"} {
+		for _, step := range module.Features[feature] {
+			tx, err := conn.Begin(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tx.Exec(t.Context(), string(step.SQL)); err != nil {
+				tx.Rollback(t.Context())
+				t.Fatalf("authentication module step %s/%d failed", feature, step.Version)
+			}
+			_, err = tx.Exec(
+				t.Context(),
+				`INSERT INTO public.app_auth_migrations(feature,version,name,digest,phase) VALUES($1,$2,$3,$4,$5)`,
+				step.Feature,
+				step.Version,
+				step.Name,
+				hex.EncodeToString(step.Digest[:]),
+				string(step.Phase),
+			)
+			if err != nil {
+				tx.Rollback(t.Context())
+				t.Fatal("cannot record the authentication module step")
+			}
+			if err := tx.Commit(t.Context()); err != nil {
+				t.Fatal("cannot commit the authentication module step")
+			}
 		}
+	}
+	actual, err := migration.Inspect(t.Context(), conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := migration.Compare(actual, module.Manifest); err != nil {
+		t.Fatal(err)
+	}
+	for _, script := range []string{
+		"verify-sessions.js", "verify-invites.js", "verify-postgres.js", "verify-signup-hook.js",
+		"verify-auth-email.js",
+	} {
+		t.Run(script, func(t *testing.T) {
+			command := exec.CommandContext(
+				t.Context(),
+				"node",
+				"--test",
+				"--test-reporter=tap",
+				filepath.Join(root, "test", script),
+			)
+			command.Dir = root
+			command.Env = append(os.Environ(),
+				"CHIK_TEST_DATABASE_URL="+connection,
+				"CHIK_TEST_DATABASE_CA="+cert,
+				"CHIK_TEST_DATABASE_KEY="+key,
+				"CHIK_REQUIRE_URL_CORPUS=1",
+			)
+			out, err := command.CombinedOutput()
+			summary := []string{}
+			for line := range strings.SplitSeq(string(out), "\n") {
+				if strings.HasPrefix(line, "# tests ") || strings.HasPrefix(line, "# pass ") ||
+					strings.HasPrefix(line, "# fail ") || strings.HasPrefix(line, "# skipped ") {
+					summary = append(summary, line)
+				}
+			}
+			if err != nil {
+				pattern := regexp.MustCompile(
+					regexp.QuoteMeta(script) + `:[0-9]+:[0-9]+|ERR_[A-Z_]+|code: '[A-Z0-9]{5}'`,
+				)
+				summary = append(summary, pattern.FindAllString(string(out), -1)...)
+			}
+			t.Log(strings.Join(summary, ", "))
+			if err != nil {
+				t.Fatalf("%s failed: %v (raw output omitted to protect authentication values)", script, err)
+			}
+			if !slices.Contains(summary, "# skipped 0") {
+				t.Fatalf("%s did not report zero skipped tests", script)
+			}
+		})
 	}
 }

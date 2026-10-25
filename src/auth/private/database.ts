@@ -5,6 +5,101 @@ import type { DatabasePort } from "../../orm.js";
 export { and, or, not } from "../../orm.js";
 export type { DatabasePort, Filter, FindManyOptions } from "../../orm.js";
 
+export interface AppAuthActionTokensRow {
+  readonly attempts: number;
+  readonly consumedAt: string | null;
+  readonly createdAt: string;
+  readonly expiresAt: string;
+  readonly id: string;
+  readonly kind: string;
+  readonly tokenHash: string;
+  readonly userId: string;
+}
+
+export interface AppAuthActionTokensInsert {
+  readonly attempts?: number;
+  readonly consumedAt?: string | null;
+  readonly createdAt?: string;
+  readonly expiresAt: string;
+  readonly id?: string;
+  readonly kind: string;
+  readonly tokenHash: string;
+  readonly userId: string;
+}
+
+export interface AppAuthActionTokensUpdate {
+  readonly attempts?: number;
+  readonly consumedAt?: string | null;
+  readonly createdAt?: string;
+  readonly expiresAt?: string;
+  readonly kind?: string;
+  readonly tokenHash?: string;
+  readonly userId?: string;
+}
+
+
+export interface AppAuthActionTokensPrimaryKey {
+  readonly id: string;
+}
+
+export const appAuthActionTokensTable = defineTable<AppAuthActionTokensRow>({
+  name: "app_auth_action_tokens",
+  primaryKey: ["id",],
+  requiredInsertColumns: ["expiresAt","kind","tokenHash","userId",],
+  columns: {
+    attempts: {
+      databaseName: "attempts",
+      encode: (value) => encodeValue("integer", false, value),
+      decode: (value) => decodeValue("integer", false, value) as number,
+    },
+    consumedAt: {
+      databaseName: "consumed_at",
+      encode: (value) => encodeValue("timestamp", true, value),
+      decode: (value) => decodeValue("timestamp", true, value) as string | null,
+    },
+    createdAt: {
+      databaseName: "created_at",
+      encode: (value) => encodeValue("timestamp", false, value),
+      decode: (value) => decodeValue("timestamp", false, value) as string,
+    },
+    expiresAt: {
+      databaseName: "expires_at",
+      encode: (value) => encodeValue("timestamp", false, value),
+      decode: (value) => decodeValue("timestamp", false, value) as string,
+    },
+    id: {
+      databaseName: "id",
+      encode: (value) => encodeValue("id", false, value),
+      decode: (value) => decodeValue("id", false, value) as string,
+    },
+    kind: {
+      databaseName: "kind",
+      encode: (value) => encodeValue("string", false, value),
+      decode: (value) => decodeValue("string", false, value) as string,
+    },
+    tokenHash: {
+      databaseName: "token_hash",
+      encode: (value) => encodeValue("string", false, value),
+      decode: (value) => decodeValue("string", false, value) as string,
+    },
+    userId: {
+      databaseName: "user_id",
+      encode: (value) => encodeValue("id", false, value),
+      decode: (value) => decodeValue("id", false, value) as string,
+    },
+  },
+  constraints: {
+    attempts: { unique: false, references: "" },
+    consumedAt: { unique: false, references: "" },
+    createdAt: { unique: false, references: "" },
+    expiresAt: { unique: false, references: "" },
+    id: { unique: false, references: "" },
+    kind: { unique: false, references: "" },
+    tokenHash: { unique: true, references: "" },
+    userId: { unique: false, references: "app_auth_users.id" },
+  },
+});
+
 export interface AppAuthIdentitiesRow {
   readonly createdAt: string;
   readonly provider: string;
@@ -165,6 +260,83 @@ export const appAuthInvitesTable = defineTable<AppAuthInvitesRow>({
     redeemedAt: { unique: false, references: "" },
     redeemedBy: { unique: false, references: "app_auth_users.id" },
     revokedAt: { unique: false, references: "" },
+  },
+});
+
+export interface AppAuthMigrationsRow {
+  readonly appliedAt: string;
+  readonly digest: string;
+  readonly feature: string;
+  readonly name: string;
+  readonly phase: string;
+  readonly version: number;
+}
+
+export interface AppAuthMigrationsInsert {
+  readonly appliedAt?: string;
+  readonly digest: string;
+  readonly feature: string;
+  readonly name: string;
+  readonly phase: string;
+  readonly version: number;
+}
+
+export interface AppAuthMigrationsUpdate {
+  readonly appliedAt?: string;
+  readonly digest?: string;
+  readonly name?: string;
+  readonly phase?: string;
+}
+
+
+export interface AppAuthMigrationsPrimaryKey {
+  readonly feature: string;
+  readonly version: number;
+}
+
+export const appAuthMigrationsTable = defineTable<AppAuthMigrationsRow>({
+  name: "app_auth_migrations",
+  primaryKey: ["feature","version",],
+  requiredInsertColumns: ["digest","feature","name","phase","version",],
+  columns: {
+    appliedAt: {
+      databaseName: "applied_at",
+      encode: (value) => encodeValue("timestamp", false, value),
+      decode: (value) => decodeValue("timestamp", false, value) as string,
+    },
+    digest: {
+      databaseName: "digest",
+      encode: (value) => encodeValue("string", false, value),
+      decode: (value) => decodeValue("string", false, value) as string,
+    },
+    feature: {
+      databaseName: "feature",
+      encode: (value) => encodeValue("string", false, value),
+      decode: (value) => decodeValue("string", false, value) as string,
+    },
+    name: {
+      databaseName: "name",
+      encode: (value) => encodeValue("string", false, value),
+      decode: (value) => decodeValue("string", false, value) as string,
+    },
+    phase: {
+      databaseName: "phase",
+      encode: (value) => encodeValue("string", false, value),
+      decode: (value) => decodeValue("string", false, value) as string,
+    },
+    version: {
+      databaseName: "version",
+      encode: (value) => encodeValue("integer", false, value),
+      decode: (value) => decodeValue("integer", false, value) as number,
+    },
+  },
+  constraints: {
+    appliedAt: { unique: false, references: "" },
+    digest: { unique: false, references: "" },
+    feature: { unique: false, references: "" },
+    name: { unique: false, references: "" },
+    phase: { unique: false, references: "" },
+    version: { unique: false, references: "" },
   },
 });
 
@@ -417,10 +589,124 @@ export const appAuthSessionsTable = defineTable<AppAuthSessionsRow>({
   },
 });
 
+export interface AppAuthSignupRequestsRow {
+  readonly attempts: number;
+  readonly codeExpiresAt: string;
+  readonly codeHash: string;
+  readonly createdAt: string;
+  readonly email: string;
+  readonly expiresAt: string;
+  readonly id: string;
+  readonly inviteId: string | null;
+  readonly passwordHash: string;
+  readonly updatedAt: string;
+}
+
+export interface AppAuthSignupRequestsInsert {
+  readonly attempts?: number;
+  readonly codeExpiresAt: string;
+  readonly codeHash: string;
+  readonly createdAt?: string;
+  readonly email: string;
+  readonly expiresAt: string;
+  readonly id?: string;
+  readonly inviteId?: string | null;
+  readonly passwordHash: string;
+  readonly updatedAt?: string;
+}
+
+export interface AppAuthSignupRequestsUpdate {
+  readonly attempts?: number;
+  readonly codeExpiresAt?: string;
+  readonly codeHash?: string;
+  readonly createdAt?: string;
+  readonly email?: string;
+  readonly expiresAt?: string;
+  readonly inviteId?: string | null;
+  readonly passwordHash?: string;
+  readonly updatedAt?: string;
+}
+
+
+export interface AppAuthSignupRequestsPrimaryKey {
+  readonly id: string;
+}
+
+export const appAuthSignupRequestsTable = defineTable<AppAuthSignupRequestsRow>({
+  name: "app_auth_signup_requests",
+  primaryKey: ["id",],
+  requiredInsertColumns: ["codeExpiresAt","codeHash","email","expiresAt","passwordHash",],
+  columns: {
+    attempts: {
+      databaseName: "attempts",
+      encode: (value) => encodeValue("integer", false, value),
+      decode: (value) => decodeValue("integer", false, value) as number,
+    },
+    codeExpiresAt: {
+      databaseName: "code_expires_at",
+      encode: (value) => encodeValue("timestamp", false, value),
+      decode: (value) => decodeValue("timestamp", false, value) as string,
+    },
+    codeHash: {
+      databaseName: "code_hash",
+      encode: (value) => encodeValue("string", false, value),
+      decode: (value) => decodeValue("string", false, value) as string,
+    },
+    createdAt: {
+      databaseName: "created_at",
+      encode: (value) => encodeValue("timestamp", false, value),
+      decode: (value) => decodeValue("timestamp", false, value) as string,
+    },
+    email: {
+      databaseName: "email",
+      encode: (value) => encodeValue("string", false, value),
+      decode: (value) => decodeValue("string", false, value) as string,
+    },
+    expiresAt: {
+      databaseName: "expires_at",
+      encode: (value) => encodeValue("timestamp", false, value),
+      decode: (value) => decodeValue("timestamp", false, value) as string,
+    },
+    id: {
+      databaseName: "id",
+      encode: (value) => encodeValue("id", false, value),
+      decode: (value) => decodeValue("id", false, value) as string,
+    },
+    inviteId: {
+      databaseName: "invite_id",
+      encode: (value) => encodeValue("id", true, value),
+      decode: (value) => decodeValue("id", true, value) as string | null,
+    },
+    passwordHash: {
+      databaseName: "password_hash",
+      encode: (value) => encodeValue("string", false, value),
+      decode: (value) => decodeValue("string", false, value) as string,
+    },
+    updatedAt: {
+      databaseName: "updated_at",
+      encode: (value) => encodeValue("timestamp", false, value),
+      decode: (value) => decodeValue("timestamp", false, value) as string,
+    },
+  },
+  constraints: {
+    attempts: { unique: false, references: "" },
+    codeExpiresAt: { unique: false, references: "" },
+    codeHash: { unique: false, references: "" },
+    createdAt: { unique: false, references: "" },
+    email: { unique: false, references: "" },
+    expiresAt: { unique: false, references: "" },
+    id: { unique: false, references: "" },
+    inviteId: { unique: false, references: "app_auth_invites.id" },
+    passwordHash: { unique: false, references: "" },
+    updatedAt: { unique: false, references: "" },
+  },
+});
+
 export interface AppAuthUsersRow {
   readonly createdAt: string;
   readonly disabledAt: string | null;
   readonly email: string;
+  readonly emailVerifiedAt: string | null;
   readonly id: string;
   readonly passwordHash: string | null;
   readonly sessionVersion: number;
@@ -430,6 +716,7 @@ export interface AppAuthUsersInsert {
   readonly createdAt?: string;
   readonly disabledAt?: string | null;
   readonly email: string;
+  readonly emailVerifiedAt?: string | null;
   readonly id?: string;
   readonly passwordHash?: string | null;
   readonly sessionVersion?: number;
@@ -439,6 +726,7 @@ export interface AppAuthUsersUpdate {
   readonly createdAt?: string;
   readonly disabledAt?: string | null;
   readonly email?: string;
+  readonly emailVerifiedAt?: string | null;
   readonly passwordHash?: string | null;
   readonly sessionVersion?: number;
 }
@@ -468,6 +756,11 @@ export const appAuthUsersTable = defineTable<AppAuthUsersRow>({
       encode: (value) => encodeValue("string", false, value),
       decode: (value) => decodeValue("string", false, value) as string,
     },
+    emailVerifiedAt: {
+      databaseName: "email_verified_at",
+      encode: (value) => encodeValue("timestamp", true, value),
+      decode: (value) => decodeValue("timestamp", true, value) as string | null,
+    },
     id: {
       databaseName: "id",
       encode: (value) => encodeValue("id", false, value),
@@ -488,6 +781,7 @@ export const appAuthUsersTable = defineTable<AppAuthUsersRow>({
     createdAt: { unique: false, references: "" },
     disabledAt: { unique: false, references: "" },
     email: { unique: true, references: "" },
+    emailVerifiedAt: { unique: false, references: "" },
     id: { unique: false, references: "" },
     passwordHash: { unique: false, references: "" },
     sessionVersion: { unique: false, references: "" },
@@ -495,22 +789,28 @@ export const appAuthUsersTable = defineTable<AppAuthUsersRow>({
 });
 
 export interface Database {
+  readonly appAuthActionTokens: Repository<AppAuthActionTokensRow, AppAuthActionTokensInsert, AppAuthActionTokensUpdate, AppAuthActionTokensPrimaryKey>;
   readonly appAuthIdentities: Repository<AppAuthIdentitiesRow, AppAuthIdentitiesInsert, AppAuthIdentitiesUpdate, AppAuthIdentitiesPrimaryKey>;
   readonly appAuthInvites: Repository<AppAuthInvitesRow, AppAuthInvitesInsert, AppAuthInvitesUpdate, AppAuthInvitesPrimaryKey>;
+  readonly appAuthMigrations: Repository<AppAuthMigrationsRow, AppAuthMigrationsInsert, AppAuthMigrationsUpdate, AppAuthMigrationsPrimaryKey>;
   readonly appAuthRateLimits: Repository<AppAuthRateLimitsRow, AppAuthRateLimitsInsert, AppAuthRateLimitsUpdate, AppAuthRateLimitsPrimaryKey>;
   readonly appAuthRefreshTokens: Repository<AppAuthRefreshTokensRow, AppAuthRefreshTokensInsert, AppAuthRefreshTokensUpdate, AppAuthRefreshTokensPrimaryKey>;
   readonly appAuthSessions: Repository<AppAuthSessionsRow, AppAuthSessionsInsert, AppAuthSessionsUpdate, AppAuthSessionsPrimaryKey>;
+  readonly appAuthSignupRequests: Repository<AppAuthSignupRequestsRow, AppAuthSignupRequestsInsert, AppAuthSignupRequestsUpdate, AppAuthSignupRequestsPrimaryKey>;
   readonly appAuthUsers: Repository<AppAuthUsersRow, AppAuthUsersInsert, AppAuthUsersUpdate, AppAuthUsersPrimaryKey>;
   transaction<T>(work: (database: Database) => Promise<T>): Promise<T>;
 }
 
 export function createDatabase(port: DatabasePort): Database {
   return {
+    appAuthActionTokens: new Repository<AppAuthActionTokensRow, AppAuthActionTokensInsert, AppAuthActionTokensUpdate, AppAuthActionTokensPrimaryKey>(port, appAuthActionTokensTable),
     appAuthIdentities: new Repository<AppAuthIdentitiesRow, AppAuthIdentitiesInsert, AppAuthIdentitiesUpdate, AppAuthIdentitiesPrimaryKey>(port, appAuthIdentitiesTable),
     appAuthInvites: new Repository<AppAuthInvitesRow, AppAuthInvitesInsert, AppAuthInvitesUpdate, AppAuthInvitesPrimaryKey>(port, appAuthInvitesTable),
+    appAuthMigrations: new Repository<AppAuthMigrationsRow, AppAuthMigrationsInsert, AppAuthMigrationsUpdate, AppAuthMigrationsPrimaryKey>(port, appAuthMigrationsTable),
     appAuthRateLimits: new Repository<AppAuthRateLimitsRow, AppAuthRateLimitsInsert, AppAuthRateLimitsUpdate, AppAuthRateLimitsPrimaryKey>(port, appAuthRateLimitsTable),
     appAuthRefreshTokens: new Repository<AppAuthRefreshTokensRow, AppAuthRefreshTokensInsert, AppAuthRefreshTokensUpdate, AppAuthRefreshTokensPrimaryKey>(port, appAuthRefreshTokensTable),
     appAuthSessions: new Repository<AppAuthSessionsRow, AppAuthSessionsInsert, AppAuthSessionsUpdate, AppAuthSessionsPrimaryKey>(port, appAuthSessionsTable),
+    appAuthSignupRequests: new Repository<AppAuthSignupRequestsRow, AppAuthSignupRequestsInsert, AppAuthSignupRequestsUpdate, AppAuthSignupRequestsPrimaryKey>(port, appAuthSignupRequestsTable),
     appAuthUsers: new Repository<AppAuthUsersRow, AppAuthUsersInsert, AppAuthUsersUpdate, AppAuthUsersPrimaryKey>(port, appAuthUsersTable),
     transaction: (work) => port.transaction((transaction) => work(createDatabase(transaction))),
   };

@@ -1,4 +1,4 @@
-import { createHash, randomBytes, scrypt, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomInt, scrypt, timingSafeEqual } from "node:crypto";
 import { Buffer } from "node:buffer";
 
 const prefix = "scrypt$32768$8$3$";
@@ -34,4 +34,16 @@ export function randomToken(): string {
 
 export function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
+}
+
+export function randomCode(): string {
+  return randomInt(10 ** 6).toString().padStart(6, "0");
+}
+
+export function hashCode(email: string, code: string): string {
+  return hashToken(email + "\0" + code);
+}
+
+export function verifyCode(email: string, code: string, expected: string): boolean {
+  return timingSafeEqual(Buffer.from(hashCode(email, code), "hex"), Buffer.from(expected, "hex"));
 }

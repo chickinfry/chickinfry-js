@@ -1,7 +1,7 @@
 import { cleanupBudgetMillis } from "../postgres.js";
 import { and, or, createDatabase, appAuthSessionsTable, type Database, type DatabasePort } from "./private/database.js";
 import { encodeTimestampValue } from "../orm.js";
-import { cleanupCandidates as candidates, type CleanupCondition } from "./core/rules.js";
+import { cleanupCandidates as candidates, emailPolicy, type CleanupCondition } from "./core/rules.js";
 import type { Store } from "./core/store.js";
 
 export type { DatabasePort } from "./private/database.js";
@@ -32,12 +32,71 @@ export function createStore(port: DatabasePort): RuntimeStore {
 
 function databaseStore(db: Database): RuntimeStore {
   return {
+    signup: id => db.appAuthSignupRequests.findById({id}),
+    signupsByEmail: email => db.appAuthSignupRequests.findMany({where: c => c.email.equals(email)}),
+    lockSignupEmail: async (keyHash, expiresAt) => {
+      // The shared row serializes attempts before any signup-row locks, including the first insert.
+      await db.appAuthRateLimits.upsert({action: "signup_attempt", keyHash, attemptCount: 0, expiresAt});
+    },
+    saveSignup: async values => { await db.appAuthSignupRequests.insert(values); },
+    lockSignup: (row, at) => db.appAuthSignupRequests.updateIf({id: row.id},
+      c => and(c.codeHash.equals(row.codeHash), c.expiresAt.greaterThan(at)), {updatedAt: row.updatedAt}),
+    renewSignup: (row, codeHash, codeExpiresAt, updatedAt) => db.appAuthSignupRequests.updateIf({id: row.id},
+      c => and(c.codeHash.equals(row.codeHash), c.expiresAt.greaterThan(updatedAt),
+        c.updatedAt.lessThanOrEquals(new Date(Date.parse(updatedAt) - emailPolicy.codeResendMillis).toISOString())),
+      {codeHash, codeExpiresAt, attempts: 0, updatedAt}),
+    failSignupCode: async row => { await db.appAuthSignupRequests.updateIf({id: row.id},
+      c => c.attempts.lessThan(emailPolicy.codeMaximumAttempts), {attempts: row.attempts + 1}); },
+    deleteSignup: async id => { await db.appAuthSignupRequests.delete({id}); },
+    expiredSignupRequests: (cutoff, limit) => db.appAuthSignupRequests.findMany({
+      where: c => c.expiresAt.lessThanOrEquals(cutoff), orderBy: c => [c.expiresAt.asc(), c.id.asc()], limit,
+    }),
+    deleteExpiredSignupRequest: async (row, cutoff) => {
+      const locked = await db.appAuthSignupRequests.updateIf({id: row.id},
+        c => c.expiresAt.lessThanOrEquals(cutoff), {updatedAt: row.updatedAt});
+      if (locked) await db.appAuthSignupRequests.delete({id: row.id});
+    },
     transaction: work => db.transaction(tx => work(databaseStore(tx))),
     user: id => db.appAuthUsers.findById({id}),
     userByEmail: async email => (await db.appAuthUsers.findMany({where: c => c.email.equals(email), limit: 1}))[0],
     createUser: (email, passwordHash) => db.appAuthUsers.insert({email, passwordHash}),
     lockUser: (id, version) => db.appAuthUsers.updateIf({id}, c => and(c.disabledAt.isNull(),
       c.sessionVersion.equals(version)), {sessionVersion: version}),
+    markEmailVerified: async (id, emailVerifiedAt) => {
+      await db.appAuthUsers.update({id}, {emailVerifiedAt});
+    },
+    resetPassword: async (id, passwordHash) => {
+      await db.appAuthUsers.incrementIf({id}, c => c.disabledAt.isNull(), {sessionVersion: 1}, {passwordHash});
+    },
+    actionByToken: async (hash, kind) => (await db.appAuthActionTokens.findMany({
+      where: c => and(c.tokenHash.equals(hash), c.kind.equals(kind)), limit: 1,
+    }))[0],
+    failActionCode: async row => { await db.appAuthActionTokens.updateIf({id: row.id},
+      c => c.attempts.lessThan(emailPolicy.codeMaximumAttempts), {attempts: row.attempts + 1}); },
+    liveActionToken: async (userId, kind, at) => (await db.appAuthActionTokens.findMany({
+      where: c => and(c.userId.equals(userId), c.kind.equals(kind), c.consumedAt.isNull(), c.expiresAt.greaterThan(at)), limit: 1,
+    }))[0],
+    createActionToken: values => db.appAuthActionTokens.insert(values),
+    invalidateActionTokens: async (userId, kind, consumedAt) => {
+      const rows = await db.appAuthActionTokens.findMany({
+        where: c => and(c.userId.equals(userId), c.kind.equals(kind), c.consumedAt.isNull()),
+      });
+      for (const row of rows) await db.appAuthActionTokens.updateIf({id: row.id}, c => c.consumedAt.isNull(), {consumedAt});
+    },
+    consumeActionToken: (id, kind, at) => db.appAuthActionTokens.updateIf({id},
+      c => and(c.kind.equals(kind), c.consumedAt.isNull(), c.expiresAt.greaterThan(at)), {consumedAt: at}),
+    consumedActionTokens: limit => db.appAuthActionTokens.findMany({
+      where: c => c.consumedAt.isNotNull(), orderBy: c => [c.id.asc()], limit,
+    }),
+    expiredActionTokens: (cutoff, limit) => db.appAuthActionTokens.findMany({
+      where: c => c.expiresAt.lessThanOrEquals(cutoff),
+      orderBy: c => [c.expiresAt.asc(), c.id.asc()], limit,
+    }),
+    deleteExpiredActionToken: async (row, cutoff) => {
+      const locked = await db.appAuthActionTokens.updateIf({id: row.id},
+        c => or(c.expiresAt.lessThanOrEquals(cutoff), c.consumedAt.isNotNull()), {expiresAt: row.expiresAt});
+      if (locked) await db.appAuthActionTokens.delete({id: row.id});
+    },
     identity: (provider, subject) => db.appAuthIdentities.findById({provider, subject}),
     createIdentity: (provider, subject, userId) => db.appAuthIdentities.insert({provider, subject, userId}),
     session: id => db.appAuthSessions.findById({id}),
@@ -84,8 +143,11 @@ function databaseStore(db: Database): RuntimeStore {
     deleteInvite: async id => { await db.appAuthInvites.delete({id}); },
     rateLimit: key => db.appAuthRateLimits.findById(key),
     createRateLimit: values => db.appAuthRateLimits.insert(values),
-    updateRateLimit: (row, values) => db.appAuthRateLimits.updateIf({action: row.action, keyHash: row.keyHash},
-      c => and(c.attemptCount.equals(row.attemptCount), c.expiresAt.equals(row.expiresAt)), values),
+    updateRateLimit: (row, values, maximum) => values.expiresAt === row.expiresAt
+      ? db.appAuthRateLimits.incrementIf({action: row.action, keyHash: row.keyHash},
+        c => and(c.expiresAt.equals(row.expiresAt), c.attemptCount.lessThan(maximum)), {attemptCount: 1}, {expiresAt: row.expiresAt})
+      : db.appAuthRateLimits.updateIf({action: row.action, keyHash: row.keyHash},
+        c => c.expiresAt.equals(row.expiresAt), values),
     expiredRateLimits: (cutoff, limit) => db.appAuthRateLimits.findMany({where: c => c.expiresAt.lessThanOrEquals(cutoff),
       orderBy: c => [c.expiresAt.asc(), c.action.asc(), c.keyHash.asc()], limit}),
     lockRateLimit: (row, cutoff) => db.appAuthRateLimits.updateIf({action: row.action, keyHash: row.keyHash},

@@ -1,0 +1,70 @@
+[
+  {
+    "name": "email_verification lifetime",
+    "rule": "actionTokenExpiry",
+    "args": [
+      "email_verification",
+      1893456000000
+    ],
+    "expected": "2030-01-01T00:10:00.000Z"
+  },
+  {
+    "name": "password_reset lifetime",
+    "rule": "actionTokenExpiry",
+    "args": [
+      "password_reset",
+      1893456000000
+    ],
+    "expected": "2030-01-01T01:00:00.000Z"
+  },
+  {
+    "name": "email login policy 2",
+    "rule": "emailSigninAllowed",
+    "args": [
+      null
+    ],
+    "expected": false
+  },
+  {
+    "name": "email login policy 4",
+    "rule": "emailSigninAllowed",
+    "args": [
+      "2030-01-01T00:00:00.000Z"
+    ],
+    "expected": true
+  },
+  {
+    "name": "missing caller IP has no shared mail key",
+    "rule": "mailRateKeys",
+    "args": [
+      "someone@example.test",
+      null
+    ],
+    "expected": {
+      "address": "someone@example.test",
+      "ip": null
+    }
+  },
+  {
+    "name": "caller IP is supplied explicitly",
+    "rule": "mailRateKeys",
+    "args": [
+      "someone@example.test",
+      "192.0.2.1"
+    ],
+    "expected": {
+      "address": "someone@example.test",
+      "ip": "192.0.2.1"
+    }
+  },
+  {
+    "name": "reset link keeps token in fragment",
+    "rule": "actionTokenLink",
+    "args": [
+      "https://example.test",
+      "password_reset",
+      "fixture-marker"
+    ],
+    "expected": "https://example.test/auth/reset-password#token=fixture-marker"
+  }
+]

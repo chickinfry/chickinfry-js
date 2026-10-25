@@ -7,6 +7,7 @@ export interface Tokens {
   readonly refreshExpiresAt: string;
   readonly userId: string;
   readonly sessionId: string;
+  readonly emailVerified: boolean;
 }
 
 export type SessionTransport = "native" | "browser";
@@ -18,6 +19,7 @@ export interface BrowserSession {
   readonly email: string;
   readonly sessionId: string;
   readonly expiresAt: string;
+  readonly emailVerified: boolean;
 }
 
 export interface IdentityProvider {
@@ -40,7 +42,32 @@ export interface AuthOptions {
   readonly signup?: "open" | "invite-only";
   readonly projectId?: string;
   readonly session?: SessionPolicy;
+  readonly email?: { readonly verification: "required" | "off" };
+  readonly mailer?: AuthMailer;
+  readonly emailLinkBase?: string;
+  readonly projectName?: string;
 }
+
+export type ActionTokenKind = "email_verification" | "password_reset";
+export type AuthMailKind = ActionTokenKind | "account_exists";
+
+export interface AuthMail {
+  readonly to: string;
+  readonly kind: AuthMailKind;
+  readonly subject: string;
+  readonly text: string;
+  readonly html: string;
+}
+
+export interface AuthMailer {
+  send(message: AuthMail): Promise<void>;
+}
+
+export interface Accepted { readonly accepted: true; }
+
+export interface SignupAttempt extends Accepted { readonly attempt: string; }
+
+export type SignupHookResult = void | {readonly reject: string};
 
 export interface InviteSummary {
   readonly id: string;

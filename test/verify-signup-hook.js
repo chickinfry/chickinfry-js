@@ -28,6 +28,8 @@ function fixture(t, creating, query = async () => []) {
 
 test("signup hook deadline invalidates queued and retained statements", async t => {
   t.mock.timers.enable({apis: ["setTimeout"]});
+  /** Flush Node 22 timer warnings before capturing structured hook logs. */
+  await new Promise(setImmediate);
   const entered = Promise.withResolvers(), release = Promise.withResolvers();
   let lease, queued;
   const {run, calls, logs} = fixture(t, async tx => {
@@ -68,6 +70,19 @@ test("successful signup hook restores existing limits and closes its handle", as
   });
   await expired(lease.query("late", []));
   assert.deepEqual(logs, []);
+});
+
+test("only an explicit valid hook rejection exposes a public message", async t => {
+  const {run} = fixture(t, async () => ({reject: "  Registration is closed.  "}));
+  await assert.rejects(run(), error => error instanceof AuthError && error.status === 422 &&
+    error.code === "user_creation_rejected" && error.message === "Registration is closed.");
+  const message = String.fromCodePoint(0x1f6ab).repeat(200);
+  const boundary = fixture(t, async () => ({reject: message}));
+  await assert.rejects(boundary.run(), error => error.code === "user_creation_rejected" && error.message === message);
+  for (const result of [null, false, {}, {reject: " "}, {reject: 1}, {reject: "x".repeat(201)}]) {
+    const {run} = fixture(t, async () => result);
+    await failed(run());
+  }
 });
 
 test("elapsed time rejects a hook even when the event loop delays the timer", async t => {
