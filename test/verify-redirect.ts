@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { HTTP, BrowserHTTP, OperationError } from "../src/http.js";
+import { HttpTransport, BrowserHttpTransport, ClientError, OperationError } from "../src/http.js";
 
 const origins: ReadonlyArray<readonly [string, boolean]> = [
   ["http://127.0.0.1", true],
@@ -41,44 +41,44 @@ const origins: ReadonlyArray<readonly [string, boolean]> = [
   ["http://127.0.0.1#fragment", false],
   ["https://example.com#fragment", false],
 ];
-for (const Transport of [HTTP, BrowserHTTP]) {
+for (const Transport of [HttpTransport, BrowserHttpTransport]) {
   for (const [origin, allowed] of origins) {
     const create = () => new Transport(origin);
     if (allowed) assert.doesNotThrow(create, origin);
-    else assert.throws(create, /operation endpoint|Operation endpoint/, origin);
+    else assert.throws(create, error => error instanceof ClientError && error.code === "invalid_argument", origin);
   }
 }
 
 const originalFetch = globalThis.fetch;
 globalThis.fetch = async () => new Response(null, {status: 302, headers: {location: "https://redirect.example"}});
 try {
-  await new HTTP("https://example.com").invoke("catalog.create", {});
+  await new HttpTransport("https://example.com").invoke("catalog.create", {});
   throw new Error("redirect was followed");
 } catch (error) {
-  if (!(error instanceof OperationError) || error.code !== "redirect_not_allowed" || error.status !== 302) throw error;
+  if (!(error instanceof ClientError) || error.code !== "internal" || error.status !== 302) throw error;
 } finally {
   globalThis.fetch = originalFetch;
 }
 
 const errorResponses: ReadonlyArray<readonly [string, number, string]> = [
-  ["not JSON", 502, "invalid_response"],
-  ["{}", 400, "invalid_response"],
-  ['{"message":"Rejected."}', 403, "invalid_response"],
-  ['{"error":42}', 401, "invalid_response"],
-  ['{"error":null}', 500, "invalid_response"],
-  ['{"error":"INVALID_TOKEN"}', 401, "invalid_response"],
-  ['{"error":""}', 503, "invalid_response"],
-  ['{"error":"invalid-token"}', 401, "invalid_response"],
-  ["null", 500, "invalid_response"],
-  ["[]", 502, "invalid_response"],
+  ["not JSON", 502, "internal"],
+  ["{}", 400, "internal"],
+  ['{"message":"Rejected."}', 403, "internal"],
+  ['{"error":42}', 401, "internal"],
+  ['{"error":null}', 500, "internal"],
+  ['{"error":"INVALID_TOKEN"}', 401, "internal"],
+  ['{"error":""}', 503, "internal"],
+  ['{"error":"invalid-token"}', 401, "internal"],
+  ["null", 500, "internal"],
+  ["[]", 502, "internal"],
   ['{"error":"invalid_token"}', 401, "invalid_token"],
   ['{"error":"operation_failed"}', 500, "operation_failed"],
 ];
 try {
   for (const [body, status, code] of errorResponses) {
     globalThis.fetch = async () => new Response(body, {status});
-    await assert.rejects(new HTTP("https://example.com").invoke("catalog.create", {}),
-      error => error instanceof OperationError && error.code === code && error.status === status, body);
+    await assert.rejects(new HttpTransport("https://example.com").invoke("catalog.create", {}),
+      error => error instanceof (code === "internal" ? ClientError : OperationError) && error.code === code && error.status === status, body);
   }
 } finally {
   globalThis.fetch = originalFetch;

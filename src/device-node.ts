@@ -1,3 +1,4 @@
+import {ClientError} from "./http.js";
 import type {Owner, Store} from "./device.js";
 import {failure} from "./device.js";
 import type * as FileSystem from "node:fs/promises";
@@ -104,7 +105,7 @@ export async function openStore(owner: Owner, requested: string | undefined, cwd
       try {
         const info = await checkFile(handle, file);
         if (validateOnly) return null;
-        if (info.size > 8192) throw failure("device_storage_corrupt");
+        if (info.size > 8192) throw failure("data_loss");
         return await handle.readFile("utf8");
       } finally { await handle.close(); }
     };
@@ -141,8 +142,8 @@ function isCode(error: unknown, code: string): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === code;
 }
 function mapFailure(error: unknown) {
-  if (typeof error === "object" && error !== null && "code" in error && typeof error.code === "string" && error.code.startsWith("device_storage_")) return error;
-  return failure(isCode(error, "ENOSPC") || isCode(error, "EDQUOT") ? "device_storage_full" : undefined);
+  if (error instanceof ClientError) return error;
+  return failure(isCode(error, "ENOSPC") || isCode(error, "EDQUOT") ? "resource_exhausted" : undefined);
 }
 
 async function powershell(script: string, input = ""): Promise<string> {

@@ -1,5 +1,5 @@
-import {OperationError} from "./http.js";
-import type {SessionCredentials} from "./http.js";
+import {ClientError, OperationError} from "./http.js";
+import type {ClientErrorCode, SessionCredentials} from "./http.js";
 
 export type Owner = readonly [app: string, project: string, origin: string];
 export interface Store {
@@ -24,7 +24,7 @@ interface Bundle {
 interface Snapshot {raw: string | null; bundle: Bundle}
 interface Ticket {epoch: string; generation: string; attempt?: string; email?: string; marker: string;
   sequence?: string; startedAt: number; logicalGeneration: string; localEpoch: string}
-type Send = (operation: string, input: Readonly<Record<string, unknown>>, token?: string, anonymous?: boolean) => Promise<unknown>;
+type Send = (operation: string, input: Readonly<Record<string, unknown>>, token?: string, anonymous?: boolean, received?: (status: number) => void) => Promise<unknown>;
 const flights = new Map<string, Promise<unknown>>();
 const day = 86_400_000;
 const maxInteger = (1n << 63n) - 1n;
@@ -42,7 +42,7 @@ const token = (value: unknown): value is string => typeof value === "string" && 
 const record = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const next = (value: string) => { if (!integer(value) || BigInt(value) === maxInteger) throw failure(); return String(BigInt(value) + 1n); };
 const copy = <T>(value: T): T => structuredClone(value);
-export const failure = (code = "device_storage_unavailable") => new OperationError(code, 0);
+export const failure = (code: ClientErrorCode = "failed_precondition") => new ClientError(code);
 
 function validSession(value: unknown, browser: boolean): value is Session {
   if (!record(value) || !uuid(value.userId) || !uuid(value.sessionId) || !timestamp(value.expiresAt)) return false;
@@ -55,8 +55,8 @@ function validSession(value: unknown, browser: boolean): value is Session {
 
 function decode(raw: string, owner: Owner, browser: boolean): Bundle {
   let value: unknown;
-  try { value = JSON.parse(raw); } catch { throw failure("device_storage_corrupt"); }
-  if (record(value) && typeof value.version === "number" && value.version > 1) throw failure("device_storage_version_unsupported");
+  try { value = JSON.parse(raw); } catch { throw failure("data_loss"); }
+  if (record(value) && typeof value.version === "number" && value.version > 1) throw failure("unimplemented");
   if (!record(value) || new TextEncoder().encode(raw).length > 8192 || value.version !== 1 ||
       JSON.stringify(value.owner) !== JSON.stringify(owner) || value.browser !== browser || !uuid(value.epoch) ||
       !integer(value.revision) || !integer(value.authGeneration) || !integer(value.sequence) ||
@@ -65,17 +65,17 @@ function decode(raw: string, owner: Owner, browser: boolean): Bundle {
       !Array.isArray(value.attempts) || value.attempts.length > 3 || !record(value.selections) ||
       !Object.entries(value.selections).every(([key, sequence]) => screenId(key) && integer(sequence)) ||
       !Array.isArray(value.pending) || !value.pending.every(uuid) || (value.refresh !== undefined && !uuid(value.refresh))) {
-    throw failure("device_storage_corrupt");
+    throw failure("data_loss");
   }
   const ids = new Set<string>();
   for (const attempt of value.attempts) {
     if (!record(attempt) || !uuid(attempt.id) || ids.has(attempt.id) || !text(attempt.email, 320) ||
         !screenId(attempt.screen) || !integer(attempt.sequence) || !Number.isSafeInteger(attempt.startedAt) || Number(attempt.startedAt) < 0 ||
-        Object.keys(attempt).some(key => !["id", "email", "screen", "sequence", "startedAt"].includes(key))) throw failure("device_storage_corrupt");
+        Object.keys(attempt).some(key => !["id", "email", "screen", "sequence", "startedAt"].includes(key))) throw failure("data_loss");
     ids.add(attempt.id);
   }
   if (Object.keys(value).some(key => !["version", "owner", "browser", "epoch", "revision", "authGeneration", "sequence",
-      "observedAt", "blocked", "session", "attempts", "selections", "pending", "refresh"].includes(key))) throw failure("device_storage_corrupt");
+      "observedAt", "blocked", "session", "attempts", "selections", "pending", "refresh"].includes(key))) throw failure("data_loss");
   return value as unknown as Bundle;
 }
 
@@ -92,8 +92,8 @@ function browserStore(key: string): Store {
   }};
 }
 
-function storageFailure(error: unknown): OperationError {
-  return failure(record(error) && (error.name === "QuotaExceededError" || error.code === "ENOSPC") ? "device_storage_full" : undefined);
+function storageFailure(error: unknown): ClientError {
+  return failure(record(error) && (error.name === "QuotaExceededError" || error.code === "ENOSPC") ? "resource_exhausted" : undefined);
 }
 
 export class Device {
@@ -142,14 +142,14 @@ export class Device {
     const checkGeneration = (bundle: Bundle) => {
       if (generation && (generation.epoch !== bundle.epoch || generation.generation !== bundle.authGeneration)) {
         this.memory = undefined; this.memoryGeneration = undefined;
-        throw new OperationError("unauthenticated", 401);
+        throw new ClientError("unauthenticated");
       }
     };
     let value: Snapshot;
     try { value = await this.read(); }
     catch (error) {
-      if (this.memory && error instanceof OperationError && error.code === "device_storage_unavailable") return {raw: this.disk?.raw ?? null, bundle: copy(this.memory)};
-      if (!this.browser || !(error instanceof OperationError) || !["device_storage_unavailable", "device_storage_full"].includes(error.code)) throw error;
+      if (this.memory && error instanceof ClientError && error.code === "failed_precondition") return {raw: this.disk?.raw ?? null, bundle: copy(this.memory)};
+      if (!this.browser || !(error instanceof ClientError) || !["failed_precondition", "resource_exhausted"].includes(error.code)) throw error;
       value = {raw: null, bundle: copy(this.initial)};
     }
     this.disk = value;
@@ -206,14 +206,14 @@ export class Device {
         this.prune(draft);
         draft.revision = next(draft.revision);
         const raw = JSON.stringify(draft);
-        if (draft.attempts.length > 3 || new TextEncoder().encode(raw).length > 8192) throw failure("device_storage_full");
+        if (draft.attempts.length > 3 || new TextEncoder().encode(raw).length > 8192) throw failure("resource_exhausted");
         if (await (await this.storage()).swap(last.raw, raw)) {
           this.disk = {raw, bundle: draft}; this.memory = undefined; this.memoryGeneration = undefined;
           return draft;
         }
       } catch (error) {
-        if (!(error instanceof OperationError)) throw failure();
-        if (!memoryAllowed || !["device_storage_unavailable", "device_storage_full"].includes(error.code)) throw error;
+        if (!(error instanceof ClientError)) throw failure();
+        if (!memoryAllowed || !["failed_precondition", "resource_exhausted"].includes(error.code)) throw error;
         break;
       }
     }
@@ -253,8 +253,8 @@ export class Device {
     let bundle: Bundle;
     try { bundle = (await this.snapshot()).bundle; }
     catch (error) {
-      if (operation !== "auth.logout" || !(error instanceof OperationError) ||
-          !["device_storage_corrupt", "device_storage_version_unsupported"].includes(error.code)) throw error;
+      if (operation !== "auth.logout" || !(error instanceof ClientError) ||
+          !["data_loss", "unimplemented"].includes(error.code)) throw error;
       const fresh = {...copy(this.initial), epoch: crypto.randomUUID(), blocked: true, revision: "1", authGeneration: "1"};
       const raw = JSON.stringify(fresh);
       await (await this.storage()).swap(null, raw, true);
@@ -271,7 +271,7 @@ export class Device {
         if (!same || !draft.session || !("refreshToken" in draft.session) || draft.session.refreshToken !== expired.refreshToken) return false;
         delete draft.session; delete draft.refresh; draft.authGeneration = next(draft.authGeneration); draft.blocked = true; return true;
       });
-      if (!publicAuth || operation === "auth.refresh" || !cleared) throw new OperationError("unauthenticated", 401);
+      if (!publicAuth || operation === "auth.refresh" || !cleared) throw new ClientError("unauthenticated");
       bundle = cleared;
     }
     const targeting = ["auth.verify_email", "auth.send_verification_email"].includes(operation);
@@ -289,24 +289,25 @@ export class Device {
         draft.sequence = next(draft.sequence); draft.selections[this.screen] = draft.sequence;
         return true;
       }, true);
-      if (!started) throw new OperationError("unauthenticated", 401);
+      if (!started) throw new ClientError("unauthenticated");
       ticket.sequence = started?.sequence;
       this.capture(ticket, started);
     }
     if (authChange && bundle.session) {
       const marked = await this.update(ticket, (draft, same) => { if (!same) return false; draft.pending.push(ticket.marker); return true; });
-      if (!marked) throw new OperationError("unauthenticated", 401);
+      if (!marked) throw new ClientError("unauthenticated");
       this.capture(ticket, marked);
     }
     if (operation === "auth.refresh") return this.refresh(bundle, send, ticket, input);
     const blocked = !!(this.blocked || bundle.blocked || (!this.memory && (bundle.refresh || bundle.pending.length)));
-    if (!publicAuth && blocked) throw new OperationError("unauthenticated", 401);
+    if (!publicAuth && blocked) throw new ClientError("unauthenticated");
     const session = blocked ? undefined : bundle.session;
+    if (!publicAuth && !session && !this.browser) throw new ClientError("unauthenticated");
     let access = session && "accessToken" in session ? session.accessToken : undefined;
     let value: unknown;
     try { value = await send(operation, input, access, publicOperation && blocked && !authChange); }
     catch (error) {
-      if (authChange && error instanceof OperationError && error.status >= 400 && error.status < 500 && error.code !== "invalid_response") {
+      if (authChange && error instanceof OperationError && error.status >= 400 && error.status < 500) {
         await this.update(ticket, (draft, same) => {
           if (!same || !draft.pending.includes(ticket.marker)) return false;
           draft.pending = draft.pending.filter(marker => marker !== ticket.marker); return true;
@@ -318,13 +319,13 @@ export class Device {
         const current = (await this.snapshot()).bundle;
         if (current.blocked || !current.session || !("accessToken" in current.session) ||
             current.session.userId !== session.userId || current.session.sessionId !== session.sessionId ||
-            current.session.accessToken !== access) throw new OperationError("unauthenticated", 401);
+            current.session.accessToken !== access) throw new ClientError("unauthenticated");
         return send(operation, input, access);
       }
       throw error;
     }
     if (operation === "auth.signup" && record(value) && value.accepted === true && uuid(value.attempt)) {
-      if (!ticket.email || !text(ticket.email, 320) || !ticket.sequence) throw new OperationError("invalid_response", 200);
+      if (!ticket.email || !text(ticket.email, 320) || !ticket.sequence) throw new ClientError("internal", undefined, true);
       await this.update(ticket, (draft, same) => {
         if (!same) return false;
         draft.pending = draft.pending.filter(marker => marker !== ticket.marker);
@@ -339,26 +340,26 @@ export class Device {
         let latest: Snapshot;
         try { latest = await this.read(); }
         catch (error) {
-          if (!(error instanceof OperationError) || !["device_storage_unavailable", "device_storage_full"].includes(error.code)) throw error;
+          if (!(error instanceof ClientError) || !["failed_precondition", "resource_exhausted"].includes(error.code)) throw error;
           latest = this.disk ?? {raw: null, bundle: copy(this.initial)};
         }
         if (!this.same(latest.bundle, ticket)) return value;
         const current = this.session(await send("auth.session", {}));
-        if (current.sessionId !== session.sessionId) throw new OperationError("invalid_token", 401);
+        if (current.sessionId !== session.sessionId) throw new ClientError("unauthenticated");
       }
       await this.install(ticket, session);
     }
     return value;
   }
 
-  private session(value: unknown): Session {
-    if (!record(value)) throw new OperationError("invalid_response", 200);
+  private session(value: unknown, status?: number): Session {
+    if (!record(value)) throw new ClientError("internal", status, true);
     const session: Session = this.browser ? {userId: value.id as string, sessionId: value.session_id as string,
       email: value.email as string, expiresAt: value.expires_at as string} :
       {accessToken: value.access_token as string, refreshToken: value.refresh_token as string,
         userId: value.user_id as string, sessionId: value.session_id as string,
         expiresAt: value.expires_at as string, refreshExpiresAt: value.refresh_expires_at as string};
-    if (!validSession(session, this.browser)) throw new OperationError("invalid_response", 200);
+    if (!validSession(session, this.browser)) throw new ClientError("internal", status, true);
     return session;
   }
 
@@ -386,7 +387,7 @@ export class Device {
 
   private async refresh(bundle: Bundle, send: Send, ticket: Ticket, input?: Readonly<Record<string, unknown>>): Promise<unknown> {
     if (this.browser || this.blocked || !bundle.session || !("refreshToken" in bundle.session) || bundle.refresh || bundle.blocked || bundle.pending.length ||
-        Date.parse(bundle.session.refreshExpiresAt) <= Date.now() || (input && input.refresh_token !== bundle.session.refreshToken)) throw new OperationError("invalid_token", 401);
+        Date.parse(bundle.session.refreshExpiresAt) <= Date.now() || (input && input.refresh_token !== bundle.session.refreshToken)) throw new ClientError("unauthenticated");
     const session = bundle.session;
     let current: SessionCredentials | undefined;
     const started = await this.update(ticket, (draft, same) => {
@@ -399,12 +400,13 @@ export class Device {
     });
     if (!started) {
       if (current && input === undefined) return {access_token: current.accessToken};
-      throw new OperationError("invalid_token", 401);
+      throw new ClientError("unauthenticated");
     }
     this.capture(ticket, started);
     const run = (async () => {
       let value: unknown;
-      try { value = await send("auth.refresh", {refresh_token: session.refreshToken}); }
+      let status: number | undefined;
+      try { value = await send("auth.refresh", {refresh_token: session.refreshToken}, undefined, undefined, received => { status = received; }); }
       catch (error) {
         if (error instanceof OperationError && error.status === 401) {
           await this.update(ticket, (draft, same) => {
@@ -414,11 +416,10 @@ export class Device {
           });
           throw error;
         }
-        throw new OperationError("invalid_token", 401);
+        throw error instanceof ClientError ? error : new ClientError("unauthenticated", error instanceof OperationError ? error.status : undefined, true);
       }
-      let updated: Session;
-      try { updated = this.session(value); } catch { throw new OperationError("invalid_token", 401); }
-      if (updated.userId !== session.userId || updated.sessionId !== session.sessionId) throw new OperationError("invalid_token", 401);
+      const updated = this.session(value, status);
+      if (updated.userId !== session.userId || updated.sessionId !== session.sessionId) throw new ClientError("unauthenticated");
       await this.update(ticket, (draft, same) => {
         if (!same || draft.refresh !== ticket.marker) return false;
         draft.session = updated; delete draft.refresh; return true;

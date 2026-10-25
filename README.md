@@ -19,9 +19,9 @@ Generated clients use the HTTP transport to call your application's declared
 operations. You can also call an operation directly:
 
 ```js
-import { HTTP } from "@chickinfry/chickinfry";
+import { HttpTransport } from "@chickinfry/chickinfry";
 
-const transport = new HTTP("https://api.example.com");
+const transport = new HttpTransport("https://api.example.com");
 const result = await transport.invoke("catalog.list", {});
 console.log(result);
 ```
@@ -30,6 +30,22 @@ Replace the endpoint and operation with those from your application. Endpoints
 must be HTTPS origins, or HTTP origins with an explicit loopback IP address for
 local development. Authenticated operations use
 `transport.withBearer(accessToken).invoke(...)`.
+
+`HttpTransport` implements `Transport`. Its optional timeout is in milliseconds:
+`new HttpTransport(origin, token, {timeout: 30000})`, or `{token, persist, timeout}`
+in its existing options object. `BrowserHttpTransport(origin, {timeout: 30000})`
+uses browser cookies with no refresh or bearer token. Both default to 30 seconds;
+use a positive integer no greater than 2147483647.
+
+`MemoryStore(credentials)` implements `SessionStore` for in-memory sessions and
+can be passed to `transport.withSession(store)`. Missing sessions throw
+`ClientError` with `code: "unauthenticated"` before sending protected calls.
+Local failures use `ClientError.code`; `status` is present only when an HTTP
+response was received, and `outcomeUnknown` identifies failures whose server
+result cannot be determined. Timeouts use `deadline_exceeded` and cancellations
+use `canceled`, without synthetic HTTP status codes. Valid server errors remain
+`OperationError` with their original code and status. No old transport aliases
+are exported.
 
 ## Entry points
 
@@ -87,17 +103,17 @@ Local HTTP browser sessions work in Chromium and Firefox; Safari/WebKit does not
 
 Generated SDKs with device persistence enabled keep sessions and pending signup
 attempts across reloads and restarts by default. Upgrade the generator and runtime
-together. Standalone `new HTTP(origin)` and `new BrowserHTTP(origin)` retain their
+together. Standalone `new HttpTransport(origin)` and `new BrowserHttpTransport(origin)` retain their
 stateless behavior. Explicit bearer tokens and custom `SessionStore` values are
 never copied into the default device store.
 
 The second HTTP argument accepts the existing token string or `TransportOptions`:
 
 ```ts
-new HTTP(origin, token);
-new HTTP(origin, {token, persist: false});
-new HTTP(origin, {persist: {dir: "./private-state"}});
-new BrowserHTTP(origin, {persist: false});
+new HttpTransport(origin, token);
+new HttpTransport(origin, {token, persist: false});
+new HttpTransport(origin, {persist: {dir: "./private-state"}});
+new BrowserHttpTransport(origin, {persist: false});
 ```
 
 Generated browser clients accept the same `persist` option through
@@ -136,9 +152,9 @@ repeated to repair a storage failure. A refresh or account switch that cannot
 save its required safety marker is not sent. An interrupted refresh or account
 switch requires a new sign-in after restart. Logout deletion failures remain
 errors. Corrupt data and records written by a newer SDK are preserved and blocked
-instead of silently reset. Storage failures use `OperationError` with status `0`
-and `device_storage_unavailable`, `device_storage_corrupt`, `device_storage_full`,
-or `device_storage_version_unsupported`.
+instead of silently reset. Storage failures use `ClientError` without an HTTP status
+and `failed_precondition`, `data_loss`, `resource_exhausted`,
+or `unimplemented`.
 
 ### Email verification and password reset
 

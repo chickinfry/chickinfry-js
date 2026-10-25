@@ -7,7 +7,7 @@ import {fileURLToPath} from "node:url";
 import {spawn} from "node:child_process";
 import {test} from "node:test";
 import {createServer} from "node:http";
-import {HTTP, BrowserHTTP, OperationError} from "../src/http.js";
+import {HttpTransport, BrowserHttpTransport, ClientError, OperationError} from "../src/http.js";
 import type {TransportOptions} from "../src/http.js";
 
 const origin = "https://api.example.com";
@@ -21,8 +21,8 @@ const credential = () => ({access_token: randomBytes(32).toString("base64url"),
   refresh_token: randomBytes(32).toString("base64url"), user_id: randomUUID(), session_id: randomUUID(),
   expires_at: new Date(Date.now() + 900_000).toISOString(),
   refresh_expires_at: new Date(Date.now() + 86_400_000).toISOString()});
-const unavailable = (error: unknown) => error instanceof OperationError &&
-  error.code === "device_storage_unavailable" && error.status === 0;
+const unavailable = (error: unknown) => error instanceof ClientError &&
+  error.code === "failed_precondition" && error.status === undefined;
 const originalFetch = globalThis.fetch;
 const deferred = <T>() => {
   let resolve!: (value: T) => void;
@@ -61,9 +61,9 @@ if (process.argv[2]) {
       return authorization === "Bearer " + session.access_token ? Response.json({ok: true}) :
         Response.json({error: "unauthenticated"}, {status: 401});
     };
-    const transport = phase === "bearer-string" ? new HTTP(origin, session.access_token) :
-      phase === "bearer-options" ? new HTTP(origin, {token: session.access_token, persist: {dir: join(dir, "ignored")}}) :
-      new HTTP(origin, requestedPhase.startsWith("default-") ? scoped() : phase === "late-disabled" ? {persist: false} : {persist: {dir: join(dir, "device")}});
+    const transport = phase === "bearer-string" ? new HttpTransport(origin, session.access_token) :
+      phase === "bearer-options" ? new HttpTransport(origin, {token: session.access_token, persist: {dir: join(dir, "ignored")}}) :
+      new HttpTransport(origin, requestedPhase.startsWith("default-") ? scoped() : phase === "late-disabled" ? {persist: false} : {persist: {dir: join(dir, "device")}});
     if (phase.startsWith("bearer-") || phase === "late-disabled") {
       Reflect.set(transport, scopeKey, Reflect.get(scoped(), scopeKey));
       if (phase === "late-disabled") {
@@ -84,7 +84,7 @@ if (process.argv[2]) {
     if (phase === "empty") {
       let rejected = false;
       try { await transport.invoke("notes.list", {}); }
-      catch (error) { rejected = error instanceof OperationError && error.status === 401; }
+      catch (error) { rejected = error instanceof ClientError && error.code === "unauthenticated" && error.status === undefined; }
       if (!rejected) throw new Error("A signed-out session was restored.");
     }
   } catch { process.exitCode = 1; }
@@ -117,13 +117,13 @@ if (process.argv[2]) {
       return Response.json({ok: true});
     };
     try {
-      await new HTTP(origin, {token: access, persist: false}).invoke("notes.list", {});
+      await new HttpTransport(origin, {token: access, persist: false}).invoke("notes.list", {});
       assert.ok(authorization === "Bearer " + access);
-      await new HTTP(origin, {persist: false}).invoke("notes.list", {});
+      await new HttpTransport(origin, {persist: false}).invoke("notes.list", {});
       assert.ok(authorization === null);
-      assert.throws(() => new BrowserHTTP(origin, {persist: {dir: "device"}}), unavailable);
-      assert.throws(() => new HTTP(origin, {persist: {dir: ""}}), unavailable);
-      assert.throws(() => new HTTP(origin, {[scopeKey]: {}} as never), unavailable);
+      assert.throws(() => new BrowserHttpTransport(origin, {persist: {dir: "device"}}), unavailable);
+      assert.throws(() => new HttpTransport(origin, {persist: {dir: ""}}), unavailable);
+      assert.throws(() => new HttpTransport(origin, {[scopeKey]: {}} as never), unavailable);
     } finally { globalThis.fetch = originalFetch; }
   });
 
@@ -131,13 +131,13 @@ if (process.argv[2]) {
     const dir = await mkdtemp(join(tmpdir(), "device-corrupt-"));
     globalThis.fetch = async () => Response.json(credential());
     try {
-      await new HTTP(origin, {persist: {dir}}).invoke("auth.signin", {});
+      await new HttpTransport(origin, {persist: {dir}}).invoke("auth.signin", {});
       const file = join(dir, (await readdir(dir)).find(name => name.endsWith(".json"))!);
-      for (const [text, code] of [["{", "device_storage_corrupt"],
-        [JSON.stringify({version: 2}), "device_storage_version_unsupported"]]) {
+      for (const [text, code] of [["{", "data_loss"],
+        [JSON.stringify({version: 2}), "unimplemented"]]) {
         await writeFile(file, text, {mode: 0o600});
-        await assert.rejects(new HTTP(origin, {persist: {dir}}).invoke("notes.list", {}),
-          error => error instanceof OperationError && error.code === code);
+        await assert.rejects(new HttpTransport(origin, {persist: {dir}}).invoke("notes.list", {}),
+          error => error instanceof ClientError && error.code === code);
         assert.ok((await readFile(file, "utf8")) === text);
       }
     } finally { globalThis.fetch = originalFetch; await rm(dir, {recursive: true}); }
@@ -149,9 +149,9 @@ if (process.argv[2]) {
     globalThis.fetch = async () => { calls++; return Response.json(credential()); };
     try {
       await chmod(dir, 0o777);
-      await assert.rejects(new HTTP(origin, {persist: {dir}}).invoke("auth.signin", {}), unavailable);
+      await assert.rejects(new HttpTransport(origin, {persist: {dir}}).invoke("auth.signin", {}), unavailable);
       const nested = join(dir, "private"); await mkdir(nested, {mode: 0o700});
-      await assert.rejects(new HTTP(origin, {persist: {dir: nested}}).invoke("auth.signin", {}), unavailable);
+      await assert.rejects(new HttpTransport(origin, {persist: {dir: nested}}).invoke("auth.signin", {}), unavailable);
       assert.ok(calls === 0);
     } finally { globalThis.fetch = originalFetch; await chmod(dir, 0o700); await rm(dir, {recursive: true}); }
   });
@@ -172,10 +172,10 @@ if (process.argv[2]) {
       return Response.json({accepted: true});
     };
     try {
-      await new BrowserHTTP(origin, scoped("a")).invoke("auth.signup", {email: "a@example.com", password: randomUUID()});
-      await new BrowserHTTP(origin, scoped("b")).invoke("auth.signup", {email: "b@example.com", password: randomUUID()});
-      await new BrowserHTTP(origin, scoped("a")).invoke("auth.send_verification_email", {});
-      await new BrowserHTTP(origin, scoped("b")).invoke("auth.send_verification_email", {});
+      await new BrowserHttpTransport(origin, scoped("a")).invoke("auth.signup", {email: "a@example.com", password: randomUUID()});
+      await new BrowserHttpTransport(origin, scoped("b")).invoke("auth.signup", {email: "b@example.com", password: randomUUID()});
+      await new BrowserHttpTransport(origin, scoped("a")).invoke("auth.send_verification_email", {});
+      await new BrowserHttpTransport(origin, scoped("b")).invoke("auth.send_verification_email", {});
       assert.ok(sent.length === 2 && sent.every(Boolean));
       const text = [...values.values()].join("");
       assert.ok(!/password|refreshToken|accessToken|cookie/i.test(text));
@@ -193,14 +193,14 @@ if (process.argv[2]) {
       return Response.json({status: "ok"});
     };
     try {
-      const client = new HTTP(origin, {persist: {dir}});
+      const client = new HttpTransport(origin, {persist: {dir}});
       await client.invoke("auth.signup", {email: "a@example.com"});
       const pending = client.invoke("auth.verify_email", {});
       await started.promise;
-      await new HTTP(origin, {persist: {dir}}).invoke("auth.logout", {});
+      await new HttpTransport(origin, {persist: {dir}}).invoke("auth.logout", {});
       response.resolve(Response.json(credential()));
       await pending;
-      await assert.rejects(client.invoke("notes.list", {}), error => error instanceof OperationError && error.status === 401);
+      await assert.rejects(client.invoke("notes.list", {}), error => error instanceof ClientError && error.code === "unauthenticated" && error.status === undefined);
     } finally { globalThis.fetch = originalFetch; await rm(dir, {recursive: true}); }
   });
 
@@ -216,13 +216,13 @@ if (process.argv[2]) {
       preserved = input.attempt === secondAttempt; return Response.json({accepted: true});
     };
     try {
-      const first = new HTTP(origin, scoped("a", {persist: {dir}}));
+      const first = new HttpTransport(origin, scoped("a", {persist: {dir}}));
       await first.invoke("auth.signup", {email: "a@example.com"});
       const pending = first.invoke("auth.verify_email", {});
       await started.promise;
-      await new HTTP(origin, scoped("b", {persist: {dir}})).invoke("auth.signup", {email: "b@example.com"});
+      await new HttpTransport(origin, scoped("b", {persist: {dir}})).invoke("auth.signup", {email: "b@example.com"});
       response.resolve(Response.json(credential())); await pending;
-      await new HTTP(origin, scoped("b", {persist: {dir}})).invoke("auth.send_verification_email", {});
+      await new HttpTransport(origin, scoped("b", {persist: {dir}})).invoke("auth.send_verification_email", {});
       assert.ok(verifies === 1 && preserved);
     } finally { globalThis.fetch = originalFetch; await rm(dir, {recursive: true}); }
   });
@@ -244,19 +244,19 @@ if (process.argv[2]) {
         Response.json({ok: true}) : Response.json({error: "invalid_token"}, {status: 401});
     };
     try {
-      await new HTTP(origin, {persist: {dir}}).invoke("auth.signin", {});
-      const memory = new HTTP(origin, {persist: {dir}});
+      await new HttpTransport(origin, {persist: {dir}}).invoke("auth.signin", {});
+      const memory = new HttpTransport(origin, {persist: {dir}});
       await memory.invoke("auth.signin", {});
       await memory.invoke("notes.list", {});
       await assert.rejects(memory.invoke("auth.logout", {}), unavailable);
       const blockedCalls = protectedCalls;
-      await assert.rejects(memory.invoke("notes.list", {}), error => error instanceof OperationError && error.code === "unauthenticated");
+      await assert.rejects(memory.invoke("notes.list", {}), error => error instanceof ClientError && error.code === "unauthenticated" && error.status === undefined);
       assert.ok(protectedCalls === blockedCalls);
       await chmod(dir, 0o700);
-      await new HTTP(origin, {persist: {dir}}).invoke("auth.logout", {});
-      await new HTTP(origin, {persist: {dir}}).invoke("auth.signin", {});
+      await new HttpTransport(origin, {persist: {dir}}).invoke("auth.logout", {});
+      await new HttpTransport(origin, {persist: {dir}}).invoke("auth.signin", {});
       const before = protectedCalls;
-      await assert.rejects(memory.invoke("notes.list", {}), error => error instanceof OperationError && error.status === 401);
+      await assert.rejects(memory.invoke("notes.list", {}), error => error instanceof ClientError && error.code === "unauthenticated" && error.status === undefined);
       assert.ok(protectedCalls === before);
       await memory.invoke("notes.list", {});
     } finally { globalThis.fetch = originalFetch; await chmod(dir, 0o700); await rm(dir, {recursive: true}); }
@@ -282,8 +282,8 @@ if (process.argv[2]) {
     };
     try {
       const options = {persist: {dir}};
-      await new HTTP(origin, options).invoke("auth.signin", {});
-      await new HTTP(origin, options).invoke("auth.signup", {email: "pending@example.com"});
+      await new HttpTransport(origin, options).invoke("auth.signin", {});
+      await new HttpTransport(origin, options).invoke("auth.signup", {email: "pending@example.com"});
       const file = join(dir, (await readdir(dir)).find(name => name.endsWith(".json"))!);
       const attempt = JSON.parse(await readFile(file, "utf8")).attempts[0];
       const expire = async () => {
@@ -292,7 +292,7 @@ if (process.argv[2]) {
         bundle.selections[attempt.screen] = attempt.sequence;
         await writeFile(file, JSON.stringify(bundle), {mode: 0o600});
       };
-      const client = new HTTP(origin, options);
+      const client = new HttpTransport(origin, options);
       await client.invoke("auth.signin", {});
       await client.invoke("notes.list", {});
       assert.ok(accounts.length === 1 && accounts[0] === sessions[1].user_id);
@@ -304,14 +304,14 @@ if (process.argv[2]) {
         let reads = 0;
         device.read = async () => {
           const value = await read();
-          if (++reads === 1) {await new HTTP(origin, options).invoke("auth.signin", {}); await expire();}
+          if (++reads === 1) {await new HttpTransport(origin, options).invoke("auth.signin", {}); await expire();}
           return value;
         };
       } else {
-        await new HTTP(origin, options).invoke("auth.signin", {});
+        await new HttpTransport(origin, options).invoke("auth.signin", {});
         await expire();
       }
-      await assert.rejects(client.invoke("notes.list", {}), error => error instanceof OperationError && error.code === "unauthenticated");
+      await assert.rejects(client.invoke("notes.list", {}), error => error instanceof ClientError && error.code === "unauthenticated" && error.status === undefined);
       assert.ok(accounts.length === 0);
       const value = await client.invoke("notes.list", {}) as {user: string};
       assert.ok(accounts.length === 1 && accounts[0] === sessions[2].user_id && value.user === sessions[2].user_id);
@@ -331,23 +331,23 @@ if (process.argv[2]) {
       return Response.json({account: "anonymous"});
     };
     try {
-      const client = new HTTP(origin, scoped("a", {persist: {dir}}));
+      const client = new HttpTransport(origin, scoped("a", {persist: {dir}}));
       Reflect.set(client, Symbol.for("chickinfry.store.public.v1"), ["catalog.list_items"]);
       await client.invoke("auth.signin", {}); await client.invoke("auth.logout", {});
       const before = calls;
-      await assert.rejects(client.invoke("notes.list", {}), error => error instanceof OperationError && error.code === "unauthenticated");
+      await assert.rejects(client.invoke("notes.list", {}), error => error instanceof ClientError && error.code === "unauthenticated" && error.status === undefined);
       assert.ok(calls === before);
       for (const names of [[], ["Catalog.list_items"], ["list_items"], ["other.list_items"]]) {
         Reflect.set(client, Symbol.for("chickinfry.store.public.v1"), names);
-        await assert.rejects(client.invoke("catalog.list_items", {}), error => error instanceof OperationError && error.code === "unauthenticated");
+        await assert.rejects(client.invoke("catalog.list_items", {}), error => error instanceof ClientError && error.code === "unauthenticated" && error.status === undefined);
         assert.ok(calls === before);
       }
       Reflect.set(client, Symbol.for("chickinfry.store.public.v1"), ["catalog.list_items"]);
-      const restored = new HTTP(origin, scoped("b", {persist: {dir}}));
+      const restored = new HttpTransport(origin, scoped("b", {persist: {dir}}));
       Reflect.set(restored, Symbol.for("chickinfry.store.public.v1"), ["catalog.list_items"]);
       const options = scoped("c", {persist: {dir}});
       Reflect.set(options, Symbol.for("chickinfry.store.public.v1"), ["catalog.list_items"]);
-      for (const current of [client, restored, new HTTP(origin, options)]) {
+      for (const current of [client, restored, new HttpTransport(origin, options)]) {
         const value = await current.invoke("catalog.list_items", {}) as {account: string};
         assert.ok(value.account === "anonymous");
       }
@@ -375,12 +375,12 @@ if (process.argv[2]) {
     };
     try {
       for (const operation of ["auth.signin", "auth.request_password_reset", "catalog.list_items", "notes.list", "auth.refresh"]) {
-        await new HTTP(origin, {persist: {dir}}).invoke("auth.signin", {seed: true});
-        const client = new HTTP(origin, {persist: {dir}});
+        await new HttpTransport(origin, {persist: {dir}}).invoke("auth.signin", {seed: true});
+        const client = new HttpTransport(origin, {persist: {dir}});
         Reflect.set(client, Symbol.for("chickinfry.store.public.v1"), ["catalog.list_items"]);
         const before = calls;
         if (operation === "notes.list" || operation === "auth.refresh") {
-          await assert.rejects(client.invoke(operation, {refresh_token: expired.refresh_token}), error => error instanceof OperationError && error.status === 401);
+          await assert.rejects(client.invoke(operation, {refresh_token: expired.refresh_token}), error => error instanceof ClientError && error.code === "unauthenticated" && error.status === undefined);
           assert.ok(calls === before);
         } else {
           await client.invoke(operation, {});
@@ -406,11 +406,11 @@ if (process.argv[2]) {
         Response.json({ok: true}) : Response.json({error: "invalid_token"}, {status: 401});
     };
     try {
-      const client = new HTTP(origin, {persist: {dir}});
+      const client = new HttpTransport(origin, {persist: {dir}});
       await client.invoke("auth.signin", {}); await client.invoke("notes.list", {});
       await client.invoke("notes.list", {});
       await chmod(dir, 0o700);
-      await assert.rejects(new HTTP(origin, {persist: {dir}}).invoke("notes.list", {}), error => error instanceof OperationError && error.status === 401);
+      await assert.rejects(new HttpTransport(origin, {persist: {dir}}).invoke("notes.list", {}), error => error instanceof ClientError && error.code === "unauthenticated" && error.status === undefined);
       assert.ok(refreshes === 1);
     } finally { globalThis.fetch = originalFetch; await chmod(dir, 0o700); await rm(dir, {recursive: true}); }
   });
@@ -420,9 +420,9 @@ if (process.argv[2]) {
     let calls = 0;
     globalThis.fetch = async () => { calls++; return Response.json(credential()); };
     try {
-      await new HTTP(origin, {persist: {dir}}).invoke("auth.signin", {});
+      await new HttpTransport(origin, {persist: {dir}}).invoke("auth.signin", {});
       await chmod(dir, 0o500);
-      await assert.rejects(new HTTP(origin, {persist: {dir}}).invoke("auth.signin", {}), unavailable);
+      await assert.rejects(new HttpTransport(origin, {persist: {dir}}).invoke("auth.signin", {}), unavailable);
       assert.ok(calls === 1);
     } finally { globalThis.fetch = originalFetch; await chmod(dir, 0o700); await rm(dir, {recursive: true}); }
   });
@@ -438,7 +438,7 @@ if (process.argv[2]) {
       return Response.json({accepted: true});
     };
     try {
-      const client = new HTTP(origin, {persist: {dir}});
+      const client = new HttpTransport(origin, {persist: {dir}});
       await client.invoke("auth.signup", {email: "a@example.com"});
       Date.now = () => start + 86_400_000;
       await client.invoke("auth.send_verification_email", {});
@@ -461,7 +461,7 @@ if (process.argv[2]) {
         return Response.json({accepted: true});
       };
       try {
-        const client = new BrowserHTTP(origin, scoped());
+        const client = new BrowserHttpTransport(origin, scoped());
         await client.invoke("auth.signup", {email: "a@example.com"});
         await client.invoke("auth.send_verification_email", {});
         assert.ok(selected);
@@ -474,7 +474,7 @@ if (process.argv[2]) {
     const session = credential();
     globalThis.fetch = async () => Response.json(session);
     try {
-      await new HTTP(origin, {persist: {dir}}).invoke("auth.signin", {});
+      await new HttpTransport(origin, {persist: {dir}}).invoke("auth.signin", {});
       const file = join(dir, (await readdir(dir)).find(name => name.endsWith(".lock"))!);
       const holder = spawn(process.execPath, ["--input-type=module", "-e",
         'import {DatabaseSync} from "node:sqlite"; const db=new DatabaseSync(process.argv[1]); db.exec("BEGIN IMMEDIATE"); console.log("ready"); process.stdin.once("data",()=>process.exit(23));', file], {
@@ -484,10 +484,10 @@ if (process.argv[2]) {
       holder.stderr.resume();
       const exited = new Promise<number | null>(resolve => holder.once("exit", resolve));
       await new Promise<void>((resolve, reject) => {holder.stdout.once("data", () => resolve()); holder.once("error", reject);});
-      try { await assert.rejects(new HTTP(origin, {persist: {dir}}).invoke("auth.session", {}), unavailable); }
+      try { await assert.rejects(new HttpTransport(origin, {persist: {dir}}).invoke("auth.session", {}), unavailable); }
       finally { holder.stdin.end("exit\n"); }
       assert.ok(await exited === 23);
-      await new HTTP(origin, {persist: {dir}}).invoke("auth.session", {});
+      await new HttpTransport(origin, {persist: {dir}}).invoke("auth.session", {});
     } finally { globalThis.fetch = originalFetch; await rm(dir, {recursive: true}); }
   });
 
@@ -505,7 +505,7 @@ if (process.argv[2]) {
     const dir = await mkdtemp(join(tmpdir(), "device-temporary-"));
     globalThis.fetch = async () => Response.json(credential());
     try {
-      const client = new HTTP(origin, {persist: {dir}});
+      const client = new HttpTransport(origin, {persist: {dir}});
       await client.invoke("auth.signin", {});
       const file = (await readdir(dir)).find(name => name.endsWith(".json"))!;
       const temporary = join(dir, file.slice(0, -5) + "." + randomUUID() + ".tmp");
@@ -523,7 +523,7 @@ if (process.argv[2]) {
       return Response.json({accepted: true});
     };
     try {
-      const client = new HTTP(origin, scoped("disabled", {persist: false}));
+      const client = new HttpTransport(origin, scoped("disabled", {persist: false}));
       await client.invoke("auth.signup", {email: "a@example.com"});
       await client.invoke("auth.send_verification_email", {});
       assert.ok(selected);
@@ -542,7 +542,7 @@ if (process.argv[2]) {
       return Response.json({error: "invalid_token"}, {status: 401});
     };
     try {
-      const client = new HTTP(origin, {persist: {dir}});
+      const client = new HttpTransport(origin, {persist: {dir}});
       await client.invoke("auth.signin", {});
       const protectedCall = client.invoke("notes.list", {}).then(() => false, () => true);
       await started.promise;
@@ -571,7 +571,7 @@ if (process.argv[2]) {
         Response.json({ok: true}) : Response.json({error: "unauthenticated"}, {status: 401});
     };
     try {
-      const client = new HTTP(origin, {persist: {dir}});
+      const client = new HttpTransport(origin, {persist: {dir}});
       await client.invoke("auth.signin", {}); await client.invoke("auth.signin", {});
       await chmod(dir, 0o700);
       await client.invoke("auth.signup", {email: "pending@example.com"});
@@ -592,16 +592,16 @@ if (process.argv[2]) {
       return Response.json({ok: true});
     };
     try {
-      const client = new HTTP(origin, {persist: {dir}});
+      const client = new HttpTransport(origin, {persist: {dir}});
       await client.invoke("auth.signin", {});
       await client.invoke("auth.signup", {email: "a@example.com"});
       const verifying = client.invoke("auth.verify_email", {}); await started.promise;
       await chmod(dir, 0o500); await assert.rejects(client.invoke("auth.logout", {}), unavailable);
       await chmod(dir, 0o700);
-      await assert.rejects(client.invoke("notes.list", {}), error => error instanceof OperationError && error.status === 401);
+      await assert.rejects(client.invoke("notes.list", {}), error => error instanceof ClientError && error.code === "unauthenticated" && error.status === undefined);
       assert.ok(business === 0);
       response.resolve(Response.json(credential())); await verifying;
-      await assert.rejects(client.invoke("notes.list", {}), error => error instanceof OperationError && error.status === 401);
+      await assert.rejects(client.invoke("notes.list", {}), error => error instanceof ClientError && error.code === "unauthenticated" && error.status === undefined);
       assert.ok(business === 0);
     } finally {globalThis.fetch = originalFetch; await chmod(dir, 0o700); await rm(dir, {recursive: true});}
   });
@@ -615,11 +615,11 @@ if (process.argv[2]) {
       return Response.json(signins === 1 ? first : credential());
     };
     try {
-      const client = new HTTP(origin, {persist: {dir}});
+      const client = new HttpTransport(origin, {persist: {dir}});
       await client.invoke("auth.signin", {}); await client.invoke("auth.signin", {});
       await chmod(dir, 0o700);
-      await assert.rejects(new HTTP(origin, {persist: {dir}}).invoke("auth.refresh", {refresh_token: first.refresh_token}),
-        error => error instanceof OperationError && error.status === 401);
+      await assert.rejects(new HttpTransport(origin, {persist: {dir}}).invoke("auth.refresh", {refresh_token: first.refresh_token}),
+        error => error instanceof ClientError && error.code === "unauthenticated" && error.status === undefined);
       assert.ok(refreshes === 0);
     } finally {globalThis.fetch = originalFetch; await chmod(dir, 0o700); await rm(dir, {recursive: true});}
   });
@@ -628,13 +628,13 @@ if (process.argv[2]) {
     const dir = await mkdtemp(join(tmpdir(), "device-recovery-"));
     globalThis.fetch = async url => Response.json(new URL(String(url)).pathname === "/auth.logout" ? {status: "ok"} : credential());
     try {
-      const client = new HTTP(origin, {persist: {dir}});
+      const client = new HttpTransport(origin, {persist: {dir}});
       await client.invoke("auth.signin", {});
       const file = join(dir, (await readdir(dir)).find(name => name.endsWith(".json"))!);
       await writeFile(file, "{", {mode: 0o600});
-      await assert.rejects(client.invoke("auth.session", {}), error => error instanceof OperationError && error.code === "device_storage_corrupt");
+      await assert.rejects(client.invoke("auth.session", {}), error => error instanceof ClientError && error.code === "data_loss");
       await client.invoke("auth.logout", {});
-      await new HTTP(origin, {persist: {dir}}).invoke("auth.signin", {});
+      await new HttpTransport(origin, {persist: {dir}}).invoke("auth.signin", {});
     } finally {globalThis.fetch = originalFetch; await rm(dir, {recursive: true});}
   });
 
@@ -649,7 +649,7 @@ if (process.argv[2]) {
       sent = input.attempt; return Response.json({accepted: true});
     };
     try {
-      const clients = ["a", "b", "c"].map(screen => ({screen, client: new HTTP(origin, scoped(screen, {persist: {dir}}))}));
+      const clients = ["a", "b", "c"].map(screen => ({screen, client: new HttpTransport(origin, scoped(screen, {persist: {dir}}))}));
       await Promise.all(clients.map(({screen, client}) => client.invoke("auth.signup", {email: screen + "@example.com"})));
       for (const {screen, client} of clients) {
         await client.invoke("auth.send_verification_email", {});
@@ -659,7 +659,7 @@ if (process.argv[2]) {
       const saved = JSON.parse(await readFile(file, "utf8")).attempts;
       assert.ok(saved.length > 0 && saved.length <= 3);
       for (const attempt of saved) {
-        await new HTTP(origin, scoped(attempt.screen, {persist: {dir}})).invoke("auth.send_verification_email", {});
+        await new HttpTransport(origin, scoped(attempt.screen, {persist: {dir}})).invoke("auth.send_verification_email", {});
         assert.ok(sent === attempt.id);
       }
     } finally {globalThis.fetch = originalFetch; await rm(dir, {recursive: true});}
@@ -678,9 +678,9 @@ if (process.argv[2]) {
       return Response.json({ok: true});
     };
     try {
-      const client = new HTTP(origin, {persist: {dir}});
+      const client = new HttpTransport(origin, {persist: {dir}});
       await client.invoke("auth.signin", {});
-      const pending = client.invoke("notes.list", {}).then(() => false, error => error instanceof OperationError && error.status === 401);
+      const pending = client.invoke("notes.list", {}).then(() => false, error => error instanceof ClientError && error.code === "unauthenticated" && error.status === undefined);
       await started.promise;
       await client.invoke("auth.signin", {});
       response.resolve(Response.json({error: "invalid_token"}, {status: 401}));
@@ -695,7 +695,7 @@ if (process.argv[2]) {
     try {
       const before = join(dir, "before"), after = join(dir, "after");
       await mkdir(before); await mkdir(after);
-      process.chdir(before); const client = new HTTP(origin, {persist: {dir: "state"}});
+      process.chdir(before); const client = new HttpTransport(origin, {persist: {dir: "state"}});
       process.chdir(after); Reflect.set(client, scopeKey, Reflect.get(scoped("relative"), scopeKey));
       await client.invoke("auth.signin", {});
       assert.ok((await readdir(join(before, "state"))).some(name => name.endsWith(".json")));
@@ -716,20 +716,20 @@ if (process.argv[2]) {
     };
     const ready = deferred<void>(), resume = deferred<void>();
     try {
-      const client = new HTTP(origin, {persist: {dir}});
+      const client = new HttpTransport(origin, {persist: {dir}});
       await client.invoke("auth.signin", {});
       const device = Reflect.get(client, "device"), read = device.read.bind(device); let reads = 0;
       device.read = async () => {const value = await read(); if (++reads === 1) {ready.resolve(); await resume.promise;} return value;};
       const logout = client.invoke("auth.logout", {}); await ready.promise;
-      await new HTTP(origin, {persist: {dir}}).invoke("auth.signin", {});
+      await new HttpTransport(origin, {persist: {dir}}).invoke("auth.signin", {});
       resume.resolve(); await logout;
-      await new HTTP(origin, {persist: {dir}}).invoke("notes.list", {});
+      await new HttpTransport(origin, {persist: {dir}}).invoke("notes.list", {});
       let value = await client.invoke("notes.list", {}) as {user: string};
       assert.ok(business === 2 && value.user === second.user_id);
       await client.invoke("auth.logout", {});
-      await assert.rejects(client.invoke("notes.list", {}), error => error instanceof OperationError && error.code === "unauthenticated");
+      await assert.rejects(client.invoke("notes.list", {}), error => error instanceof ClientError && error.code === "unauthenticated" && error.status === undefined);
       assert.ok(business === 2);
-      await new HTTP(origin, {persist: {dir}}).invoke("auth.signin", {});
+      await new HttpTransport(origin, {persist: {dir}}).invoke("auth.signin", {});
       value = await client.invoke("notes.list", {}) as {user: string};
       assert.ok(business === 3 && value.user === second.user_id);
     } finally {resume.resolve(); globalThis.fetch = originalFetch; await rm(dir, {recursive: true});}
@@ -742,7 +742,7 @@ if (process.argv[2]) {
       sent = JSON.parse(String(init?.body)).attempt; return Response.json({accepted: true});
     };
     try {
-      const first = new HTTP(origin, {persist: {dir}}), second = new HTTP(origin, {persist: {dir}});
+      const first = new HttpTransport(origin, {persist: {dir}}), second = new HttpTransport(origin, {persist: {dir}});
       Reflect.set(first, scopeKey, Reflect.get(scoped("a"), scopeKey));
       Reflect.set(second, scopeKey, Reflect.get(scoped("b"), scopeKey));
       await first.invoke("auth.signup", {email: "a@example.com"});
@@ -754,7 +754,7 @@ if (process.argv[2]) {
   test("rejects conflicting or malformed attached scopes without calling the server", async () => {
     let calls = 0; globalThis.fetch = async () => {calls++; return Response.json({accepted: true});};
     try {
-      for (const Transport of [HTTP, BrowserHTTP]) {
+      for (const Transport of [HttpTransport, BrowserHttpTransport]) {
         const client = new Transport(origin, scoped("a", {persist: false}));
         Reflect.set(client, scopeKey, Reflect.get(scoped("b"), scopeKey));
         await assert.rejects(Promise.resolve().then(() => client.invoke("auth.send_verification_email", {})), unavailable);
@@ -796,13 +796,13 @@ if (process.argv[2]) {
       sent = input.attempt; return Response.json({accepted: true});
     };
     try {
-      const clients = ["a", "b", "c", "d"].map(screen => ({screen, client: new HTTP(origin, scoped(screen, {persist: {dir}}))}));
+      const clients = ["a", "b", "c", "d"].map(screen => ({screen, client: new HttpTransport(origin, scoped(screen, {persist: {dir}}))}));
       for (const {screen, client} of clients) await client.invoke("auth.signup", {email: screen + "@example.com"});
       await clients[3].client.invoke("auth.send_verification_email", {}); assert.ok(sent === attempts.get("d@example.com"));
       const file = join(dir, (await readdir(dir)).find(name => name.endsWith(".json"))!);
       const saved = JSON.parse(await readFile(file, "utf8")).attempts;
       assert.ok(saved.length === 3 && saved.every((value: {email: string; id: string}) => value.email !== "d@example.com" && attempts.get(value.email) === value.id));
-      await new HTTP(origin, scoped("a", {persist: {dir}})).invoke("auth.send_verification_email", {});
+      await new HttpTransport(origin, scoped("a", {persist: {dir}})).invoke("auth.send_verification_email", {});
       assert.ok(sent === attempts.get("a@example.com"));
     } finally {globalThis.fetch = originalFetch; await rm(dir, {recursive: true});}
   });
@@ -816,7 +816,7 @@ if (process.argv[2]) {
         Response.json({ok: true}) : Response.json({error: "unauthenticated"}, {status: 401});
     };
     try {
-      const client = new HTTP(origin, {persist: {dir}}); await client.invoke("auth.bot_config", {});
+      const client = new HttpTransport(origin, {persist: {dir}}); await client.invoke("auth.bot_config", {});
       const file = join(dir, (await readdir(dir)).find(name => name.endsWith(".json"))!);
       const bundle = JSON.parse(await readFile(file, "utf8"));
       for (let index = 0; ; index++) {
@@ -827,7 +827,7 @@ if (process.argv[2]) {
       await writeFile(file, raw, {mode: 0o600});
       await client.invoke("auth.signin", {}); await client.invoke("notes.list", {});
       assert.ok((await readFile(file, "utf8")) === raw);
-      await assert.rejects(new HTTP(origin, {persist: {dir}}).invoke("notes.list", {}), error => error instanceof OperationError && error.status === 401);
+      await assert.rejects(new HttpTransport(origin, {persist: {dir}}).invoke("notes.list", {}), error => error instanceof ClientError && error.code === "unauthenticated" && error.status === undefined);
     } finally {globalThis.fetch = originalFetch; await rm(dir, {recursive: true});}
   });
 
@@ -847,7 +847,7 @@ if (process.argv[2]) {
       if (incoming.url === "/transport.js") {outgoing.setHeader("Content-Type", "text/javascript"); outgoing.end(script); return;}
       if (incoming.method === "GET") {
         outgoing.setHeader("Content-Type", "text/html");
-        outgoing.end('<script type="module">import {BrowserHTTP} from "/transport.js"; window.create=(screen)=>{window.client=new BrowserHTTP(location.origin); Reflect.set(window.client,Symbol.for("chickinfry.store.scope.v1"),{appId:"browser-test",projectId:"browser-project",origin:location.origin,screen});Reflect.set(window.client,Symbol.for("chickinfry.store.public.v1"),["catalog.list_items"]);};window.ready=true;</script>');
+        outgoing.end('<script type="module">import {BrowserHttpTransport} from "/transport.js"; window.create=(screen)=>{window.client=new BrowserHttpTransport(location.origin); Reflect.set(window.client,Symbol.for("chickinfry.store.scope.v1"),{appId:"browser-test",projectId:"browser-project",origin:location.origin,screen});Reflect.set(window.client,Symbol.for("chickinfry.store.public.v1"),["catalog.list_items"]);};window.ready=true;</script>');
         return;
       }
       let body = ""; for await (const chunk of incoming) body += chunk;

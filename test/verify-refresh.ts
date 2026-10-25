@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
-import { HTTP, BrowserHTTP, OperationError } from "../src/http.js";
+import { HttpTransport, BrowserHttpTransport, ClientError, OperationError } from "../src/http.js";
 
-class CustomHTTP extends HTTP {
+class CustomHTTP extends HttpTransport {
   refreshFailed(): void {}
 }
 new CustomHTTP("https://example.com").refreshFailed();
@@ -48,8 +48,8 @@ globalThis.fetch = async (input, init) => {
   return new Response("{}",{status:200});
 };
 try {
-  const transport = new HTTP("https://example.com").withSession(store);
-  const secondTransport = new HTTP("https://example.com").withSession(store);
+  const transport = new HttpTransport("https://example.com").withSession(store);
+  const secondTransport = new HttpTransport("https://example.com").withSession(store);
   await Promise.all(Array.from({length:8},(_, index) => (index%2 ? secondTransport : transport).invoke("catalog.create",{})));
   if (refreshes !== 1 || accessToken !== newAccessToken || refreshToken !== "d".repeat(43) || cleared) {
     throw new Error("Refresh state mismatch.");
@@ -76,7 +76,7 @@ try {
     }
     return Response.json({error: "invalid_token"}, {status: 401});
   };
-  const browser = new BrowserHTTP("http://127.0.0.1:8012");
+  const browser = new BrowserHttpTransport("http://127.0.0.1:8012");
   await Promise.all(Array.from({length: 8}, async () => {
     try { await browser.invoke("catalog.create", {}); throw new Error("Rejected browser request succeeded."); }
     catch (error) { if (!(error instanceof OperationError) || error.status !== 401) throw error; }
@@ -130,21 +130,23 @@ try {
       }
       return current.accessToken === newAccessToken ? Response.json({}) : Response.json({error:"invalid_token"}, {status:401});
     };
-    const first = new HTTP("https://example.com").withSession(unknownStore);
-    const second = new HTTP("https://example.com").withSession(unknownStore);
-    const invalidToken = (error: unknown) => error instanceof OperationError && error.code === "invalid_token" && error.status === 401;
+    const first = new HttpTransport("https://example.com").withSession(unknownStore);
+    const second = new HttpTransport("https://example.com").withSession(unknownStore);
+    const invalidToken = (error: unknown) => (error instanceof OperationError && error.code === "invalid_token" && error.status === 401) || (error instanceof ClientError && ["unauthenticated", "failed_precondition", "deadline_exceeded", "unavailable", "internal"].includes(error.code));
     const results = await Promise.allSettled(Array.from({length:8}, (_, index) =>
       (index % 2 ? first : second).invoke("catalog.create", {})));
     assert.equal(attempts, 1, name);
     await assert.rejects(first.invoke("catalog.create", {}));
     assert.equal(attempts, 1, name);
     assert.ok(results.every(result => result.status === "rejected" && invalidToken(result.reason)), name);
+    assert.ok(results.every(result => result.status === "rejected" && result.reason instanceof ClientError && result.reason.outcomeUnknown), name);
+    if (name.startsWith("timeout")) assert.ok(results.every(result=>result.status === "rejected" && result.reason.code === "deadline_exceeded"));
     assert.equal(clears, 1, name);
     await assert.rejects(first.invoke("catalog.create", {}), invalidToken, name);
     if (name === "timeout with successful cleanup") {
-      assert.throws(() => new HTTP("https://example.com").withSession(unknownStore), /Invalid session credential/);
+      assert.throws(() => new HttpTransport("https://example.com").withSession(unknownStore), error => error instanceof ClientError && error.code === "unauthenticated");
     } else {
-      await assert.rejects(new HTTP("https://example.com").withSession(unknownStore).invoke("catalog.create", {}), invalidToken, name);
+      await assert.rejects(new HttpTransport("https://example.com").withSession(unknownStore).invoke("catalog.create", {}), invalidToken, name);
     }
     assert.equal(attempts, 1, name);
     recover = true;
@@ -184,15 +186,15 @@ try {
     }
     return current === signedIn ? Response.json({}) : Response.json({error:"invalid_token"}, {status:401});
   };
-  const racingTransport = new HTTP("https://example.com").withSession(racingStore);
+  const racingTransport = new HttpTransport("https://example.com").withSession(racingStore);
   await assert.rejects(racingTransport.invoke("catalog.create", {}),
-    error => error instanceof OperationError && error.code === "invalid_token" && error.status === 401);
+    error => (error instanceof OperationError && error.code === "invalid_token" && error.status === 401) || (error instanceof ClientError && ["unauthenticated", "failed_precondition", "deadline_exceeded", "unavailable", "internal"].includes(error.code)));
   assert.deepEqual(current, signedIn);
   await racingTransport.invoke("catalog.create", {});
   assert.equal(attempts, 1);
 
   const reviewCases: Array<readonly [string, () => Promise<void>]> = [];
-  const invalidToken = (error: unknown) => error instanceof OperationError && error.code === "invalid_token" && error.status === 401;
+  const invalidToken = (error: unknown) => (error instanceof OperationError && error.code === "invalid_token" && error.status === 401) || (error instanceof ClientError && ["unauthenticated", "failed_precondition", "deadline_exceeded", "unavailable", "internal"].includes(error.code));
   const fresh = (userId = "user-a", sessionId = "session-a"): Credentials => ({
     ...initial, accessToken:"m".repeat(43), refreshToken:"n".repeat(43), userId, sessionId,
   });
@@ -213,7 +215,7 @@ try {
       },
     };
     return {session, set: (value: Credentials) => { credentials = value; },
-      client: () => new HTTP("https://example.com").withSession(session)};
+      client: () => new HttpTransport("https://example.com").withSession(session)};
   };
   for (const outcome of ["timeout", "connection dropped", "response interrupted"]) {
     reviewCases.push([`explicit ${outcome} blocks automatic refresh`, async () => {
