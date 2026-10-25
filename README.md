@@ -1,4 +1,4 @@
-# @chickinfry/chickinfry-js
+# @chickinfry/chickinfry
 
 Shared TypeScript runtime for Chickinfry generated clients and servers.
 Generated code provides your application's typed services, models, and
@@ -8,7 +8,7 @@ runtime.
 ## Install
 
 ```sh
-npm install @chickinfry/chickinfry-js
+npm install @chickinfry/chickinfry
 ```
 
 This package uses ECMAScript modules (ESM).
@@ -19,7 +19,7 @@ Generated clients use the HTTP transport to call your application's declared
 operations. You can also call an operation directly:
 
 ```js
-import { HTTP } from "@chickinfry/chickinfry-js";
+import { HTTP } from "@chickinfry/chickinfry";
 
 const transport = new HTTP("https://api.example.com");
 const result = await transport.invoke("catalog.list", {});
@@ -33,11 +33,11 @@ local development. Authenticated operations use
 
 ## Entry points
 
-- `@chickinfry/chickinfry-js`: HTTP transport, operation errors, session
+- `@chickinfry/chickinfry`: HTTP transport, operation errors, session
   refresh, and the type-safe ORM core.
-- `@chickinfry/chickinfry-js/auth`: authentication runtime for generated servers.
-- `@chickinfry/chickinfry-js/postgres`: PostgreSQL adapter for generated repositories.
-- `@chickinfry/chickinfry-js/logging`: server console redaction with a secret snapshot.
+- `@chickinfry/chickinfry/auth`: authentication runtime for generated servers.
+- `@chickinfry/chickinfry/postgres`: PostgreSQL adapter for generated repositories.
+- `@chickinfry/chickinfry/logging`: server console redaction with a secret snapshot.
 
 The logging entry point guards the server's global console when imported. Run
 server work inside `runWithLogRedaction({values, databaseURL}, work)`; asynchronous
@@ -88,7 +88,7 @@ Local HTTP browser sessions work in Chromium and Firefox; Safari/WebKit does not
 Email behavior is opt-in at the runtime boundary. With no email options, signup still issues a session immediately, duplicate addresses return `account_exists` (409), and no mail is sent. A generator can enable verification explicitly with `email: {verification: "required"}`; the runtime requires an injected `AuthMailer` and an HTTPS `emailLinkBase` (HTTP loopback is allowed for development). Apply the generated email authentication migration before enabling these options.
 
 ```ts
-import { Auth, type AuthMailer } from "@chickinfry/chickinfry-js/auth";
+import { Auth, type AuthMailer } from "@chickinfry/chickinfry/auth";
 
 const mailer: AuthMailer = {
   async send(message) {
