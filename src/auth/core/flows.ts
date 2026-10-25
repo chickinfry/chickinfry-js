@@ -417,7 +417,7 @@ export class Flows {
     return row;
   }
 
-  private lockSession(tx: Store, candidate: AppAuthSessionsRow | undefined, tokenHash?: string): Promise<AppAuthSessionsRow | undefined> {
+  private lockSession(tx: Store, candidate: AppAuthSessionsRow | null | undefined, tokenHash?: string): Promise<AppAuthSessionsRow | undefined> {
     if (!candidate) return Promise.resolve(undefined);
     return tx.lockSession(candidate.id, tokenHash);
   }

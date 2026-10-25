@@ -122,8 +122,8 @@ test("two-step email authentication preserves privacy and atomic state on Postgr
   };
   const verify = (verification, runtime = auth) => runtime.verifyEmail(
     verification.attempt ? {attempt: verification.attempt} : verification.email, verification.code);
-  const pending = async email => (await db.appAuthSignupRequests.findMany({where: c => c.email.equals(email)}))[0];
-  const users = email => db.appAuthUsers.findMany({where: c => c.email.equals(email)});
+  const pending = async email => (await db.appAuthSignupRequests.findMany({where: c => c.email.eq(email)}))[0];
+  const users = email => db.appAuthUsers.findMany({where: c => c.email.eq(email)});
   const latest = async () => {
     await tick();
     const message = mail.at(-1);
@@ -180,7 +180,7 @@ test("two-step email authentication preserves privacy and atomic state on Postgr
     userId = session.userId;
     assert.equal(session.emailVerified, true);
     assert.equal((await auth.session(session.accessToken)).emailVerified, true);
-    assert.equal((await db.appAuthSignupRequests.findMany({where: c => c.email.equals(email)})).length, 0);
+    assert.equal((await db.appAuthSignupRequests.findMany({where: c => c.email.eq(email)})).length, 0);
     assert.equal((await auth.signin(email, password)).userId, userId);
     await rejected(auth.signin(email, replacement), "invalid_credentials", 401);
     assert.deepEqual(hooks, ["creating", "committed"]);
@@ -197,7 +197,7 @@ test("two-step email authentication preserves privacy and atomic state on Postgr
     const results = await Promise.all(Array.from({length: 8}, (_, index) =>
       (index % 2 ? auth : parallel).signup(address, randomUUID())));
     results.forEach(acceptedSignup);
-    const rows = await db.appAuthSignupRequests.findMany({where: c => c.email.equals(address)});
+    const rows = await db.appAuthSignupRequests.findMany({where: c => c.email.eq(address)});
     assert.equal(rows.length, 3);
     assert.ok(rows.some(row => row.id === first.attempt) && rows.some(row => row.id === second.attempt));
     const stored = new Set(rows.map(row => row.id));
@@ -211,7 +211,7 @@ test("two-step email authentication preserves privacy and atomic state on Postgr
     }
     clock += 86400000;
     const next = await signup(address);
-    const active = await db.appAuthSignupRequests.findMany({where: c => c.email.equals(address)});
+    const active = await db.appAuthSignupRequests.findMany({where: c => c.email.eq(address)});
     assert.equal(active.length, 1);
     assert.equal(active[0].id, next.attempt);
   });
@@ -386,7 +386,7 @@ test("two-step email authentication preserves privacy and atomic state on Postgr
         (status === 422 ? error.message === "Registration is closed." : error.message !== "Internal failure"));
       assert.equal((await users(address)).length, 0);
       assert.equal(typeof attemptedId, "string");
-      assert.equal((await db.appAuthSessions.findMany({where: c => c.userId.equals(attemptedId)})).length, 0);
+      assert.equal((await db.appAuthSessions.findMany({where: c => c.userId.eq(attemptedId)})).length, 0);
       assert.ok(await pending(address));
       assert.equal(committed, 0);
       assert.equal((await verify(token)).emailVerified, true);
@@ -449,8 +449,8 @@ test("two-step email authentication preserves privacy and atomic state on Postgr
       await new Auth(port, [], now, {}, {}, context).signin(ownerEmail, password);
       await Promise.all(tasks);
     } finally { console.error = original; }
-    assert.equal(await db.appAuthSignupRequests.findById({id: row.id}), undefined);
-    assert.equal(await db.appAuthInvites.findById({id: invite.id}), undefined);
+    assert.equal(await db.appAuthSignupRequests.findById({id: row.id}), null);
+    assert.equal(await db.appAuthInvites.findById({id: invite.id}), null);
     assert.deepEqual(logs, []);
   });
 
@@ -487,7 +487,7 @@ test("two-step email authentication preserves privacy and atomic state on Postgr
     await rejected(auth.signin(address, replacement), "invalid_credentials", 401);
     await tick();
     assert.equal(mail.length, before);
-    assert.equal((await db.appAuthActionTokens.findMany({where: c => c.userId.equals(result.userId)})).length, 0);
+    assert.equal((await db.appAuthActionTokens.findMany({where: c => c.userId.eq(result.userId)})).length, 0);
     await rejected(auth.session(result.accessToken), "invalid_token", 401);
     await rejected(auth.revalidateSession(result.sessionId, result.userId), "invalid_token", 401);
     await rejected(auth.session(browser.credential, "browser"), "invalid_token", 401);
@@ -497,7 +497,7 @@ test("two-step email authentication preserves privacy and atomic state on Postgr
     await rejected(auth.signin(address, password), "email_not_verified", 403);
     assert.ok(performance.now() - loginStart >= 990);
     const first = await latest(), count = mail.length;
-    assert.equal((await db.appAuthSessions.findMany({where: c => c.userId.equals(result.userId)})).length, 2);
+    assert.equal((await db.appAuthSessions.findMany({where: c => c.userId.eq(result.userId)})).length, 2);
     await rejected(auth.signin(address, password, "browser"), "email_not_verified", 403);
     await auth.sendVerificationEmail(address);
     await tick();
@@ -590,7 +590,7 @@ test("two-step email authentication preserves privacy and atomic state on Postgr
     const rows = await store.expiredSignupRequests(cutoff, 2);
     assert.ok(rows.length > 0 && rows.length <= 2);
     for (const row of rows) await store.transaction(tx => tx.deleteExpiredSignupRequest(row, cutoff));
-    for (const row of rows) assert.equal(await db.appAuthSignupRequests.findById({id: row.id}), undefined);
+    for (const row of rows) assert.equal(await db.appAuthSignupRequests.findById({id: row.id}), null);
     for (const row of [...await store.consumedActionTokens(1000), ...await store.expiredActionTokens(cutoff, 1000)]) {
       await store.transaction(tx => tx.deleteExpiredActionToken(row, cutoff));
     }

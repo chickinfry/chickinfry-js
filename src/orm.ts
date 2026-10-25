@@ -58,34 +58,34 @@ export class GeneratedColumn<Value> implements AnyColumn {
     private readonly decodeValue: (value: unknown) => Value,
   ) {}
 
-  equals(value: Value): Filter {
+  eq(value: NonNullable<Value>): Filter {
     return comparison(this, "=", value);
   }
 
-  notEquals(value: Value): Filter {
+  ne(value: NonNullable<Value>): Filter {
     return comparison(this, "<>", value);
   }
 
-  greaterThan(value: Value): Filter {
+  gt(value: NonNullable<Value>): Filter {
     return comparison(this, ">", value);
   }
 
-  greaterThanOrEquals(value: Value): Filter {
+  gte(value: NonNullable<Value>): Filter {
     return comparison(this, ">=", value);
   }
 
-  lessThan(value: Value): Filter {
+  lt(value: NonNullable<Value>): Filter {
     return comparison(this, "<", value);
   }
 
-  lessThanOrEquals(value: Value): Filter {
+  lte(value: NonNullable<Value>): Filter {
     return comparison(this, "<=", value);
   }
 
-  in(values: readonly Value[]): Filter {
+  isIn(values: readonly NonNullable<Value>[]): Filter {
     if (!Array.isArray(values)) throw new Error("in filter values must be an array.");
     const copy = [...values];
-    if (copy.some((value) => value === undefined)) throw new Error("Filter values cannot be undefined.");
+    if (copy.some((value) => value === undefined || value === null)) throw new Error("Filter values cannot be null or undefined; use isNull or isNotNull.");
     return { kind: "in", column: this, values: copy };
   }
 
@@ -301,8 +301,8 @@ export class Repository<
     return this.mapRows(await this.database.query(sql, parameters));
   }
 
-  async findById(key: PrimaryKey): Promise<Row | undefined> {
-    return (await this.findMany({ where: this.primaryKeyFilter(key), limit: 1 }))[0];
+  async findById(key: PrimaryKey): Promise<Row | null> {
+    return (await this.findMany({ where: this.primaryKeyFilter(key), limit: 1 }))[0] ?? null;
   }
 
   async insert(row: Insert): Promise<Row> {
@@ -345,7 +345,7 @@ export class Repository<
 
   async update(key: PrimaryKey, patch: Update): Promise<Row> {
     const row = await this.updateMatching(this.primaryKeyFilter(key), patch);
-    if (row === undefined) throw new Error("update result row is missing.");
+    if (row === undefined) throw Object.assign(new Error("Update target was not found."), {code:"not_found"});
     return row;
   }
 
@@ -429,11 +429,11 @@ export class Repository<
     return this.mapRows(await this.database.query(sql, parameters))[0];
   }
 
-  async delete(key: PrimaryKey): Promise<Row | undefined> {
+  async delete(key: PrimaryKey): Promise<Row | null> {
     const parameters: unknown[] = [];
     const where = compileFilter(this.primaryKeyFilter(key), this.table, parameters);
     const sql = `delete from ${quoteIdentifier(this.table.name, "table")} where ${where} returning ${this.selectList()}`;
-    return this.mapRows(await this.database.query(sql, parameters))[0];
+    return this.mapRows(await this.database.query(sql, parameters))[0] ?? null;
   }
 
   private primaryKeyFilter(key: PrimaryKey): Filter {
@@ -471,13 +471,14 @@ export class Repository<
 
   private requireRow(rows: readonly Record<string, unknown>[], operation: string): Row {
     const row = this.mapRows(rows)[0];
+    if (!row && operation === "increment") throw Object.assign(new Error("Increment target was not found."), {code:"not_found"});
     if (!row) throw new Error(`${operation} result row is missing.`);
     return row;
   }
 }
 
 function comparison(column: AnyColumn, operator: ComparisonOperator, value: unknown): Filter {
-  if (value === undefined) throw new Error("Filter values cannot be undefined.");
+  if (value === undefined || value === null) throw new Error("Filter values cannot be null or undefined; use isNull or isNotNull.");
   return { kind: "comparison", column, operator, value };
 }
 
@@ -497,36 +498,26 @@ function compileFilter(
       case "comparison": {
         const column = validateTableColumn(filter.column, table);
         const operator = validateComparisonOperator(filter.operator);
-        if (filter.value === undefined) throw new Error("Filter values cannot be undefined.");
+        if (filter.value === undefined || filter.value === null) throw new Error("Filter values cannot be null or undefined; use isNull or isNotNull.");
         const encodedValue = column.encodeDatabaseValue(filter.value);
-        if (encodedValue === null) {
-          if (operator === "=") return `${quoteIdentifier(column.databaseName, "column")} is null`;
-          if (operator === "<>") return `${quoteIdentifier(column.databaseName, "column")} is not null`;
-          throw new Error("SQL NULL only supports equals and notEquals comparisons.");
-        }
+        if (encodedValue === null) throw new Error("Use isNull or isNotNull for SQL NULL.");
         parameters.push(encodedValue);
         return `${quoteIdentifier(column.databaseName, "column")} ${operator} $${parameters.length}`;
       }
       case "in": {
         const column = validateTableColumn(filter.column, table);
         if (!Array.isArray(filter.values)) throw new Error("in filter values must be an array.");
-        if (filter.values.some((value) => value === undefined)) {
-          throw new Error("Filter values cannot be undefined.");
+        if (filter.values.some((value) => value === undefined || value === null)) {
+          throw new Error("Filter values cannot be null or undefined; use isNull or isNotNull.");
         }
         if (filter.values.length === 0) return "1 = 0";
         const encoded = filter.values.map((value) => column.encodeDatabaseValue(value));
-        const hasNull = encoded.some((value) => value === null);
-        const nonNull = encoded.filter((value) => value !== null);
-        const conditions: string[] = [];
-        if (nonNull.length > 0) {
-          const placeholders = nonNull.map((value) => {
-            parameters.push(value);
-            return `$${parameters.length}`;
-          });
-          conditions.push(`${quoteIdentifier(column.databaseName, "column")} in (${placeholders.join(", ")})`);
-        }
-        if (hasNull) conditions.push(`${quoteIdentifier(column.databaseName, "column")} is null`);
-        return conditions.length === 1 ? conditions[0]! : `(${conditions.join(" or ")})`;
+        if (encoded.some((value) => value === null)) throw new Error("Use isNull or isNotNull for SQL NULL.");
+        const placeholders = encoded.map((value) => {
+          parameters.push(value);
+          return `$${parameters.length}`;
+        });
+        return `${quoteIdentifier(column.databaseName, "column")} in (${placeholders.join(", ")})`;
       }
       case "null": {
         const column = validateTableColumn(filter.column, table);

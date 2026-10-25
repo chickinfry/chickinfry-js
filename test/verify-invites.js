@@ -25,7 +25,7 @@ try {
   const browser = await open.signup("browser@example.test", password, "", "browser");
   const storedBrowser = await db.appAuthSessions.findById({id: browser.sessionId});
   assert.ok(storedBrowser.transport === "browser" && storedBrowser.tokenHash === hashToken(browser.credential));
-  assert.equal((await db.appAuthRefreshTokens.findMany({where: c => c.sessionId.equals(browser.sessionId)})).length, 0);
+  assert.equal((await db.appAuthRefreshTokens.findMany({where: c => c.sessionId.eq(browser.sessionId)})).length, 0);
   assert.ok(Date.parse(storedBrowser.createdAt) === clock);
   assert.equal(Date.parse(browser.expiresAt) - Date.parse(storedBrowser.createdAt), 2592000000);
   await rejects(open.session(browser.credential), "invalid_token");
@@ -88,7 +88,7 @@ try {
     {id: expiryID, email: "authorized-before-expiry@example.test"}, request(owner.accessToken));
   assert.equal(issuedAtExpiry.status, "issued");
   await rejects(closed.inviteIssue(owner.accessToken, expiryID, "authorized-before-expiry@example.test"), "invalid_token");
-  assert.equal((await db.appAuthInvites.findMany({where: c => c.id.equals(expiryID)})).length, 1);
+  assert.equal((await db.appAuthInvites.findMany({where: c => c.id.eq(expiryID)})).length, 1);
   clock = beforeExpiry;
 
   const invitation = await issue(" Recipient@Example.test ");
@@ -175,7 +175,7 @@ try {
   });
   await assert.rejects(new Auth(broken, [], now, {}, options).signup(failedSession.email, password, failedSession.code));
   assert.ok((await db.appAuthInvites.findById({id: failedSession.id})).redeemedAt === null);
-  assert.equal((await db.appAuthUsers.findMany({where: c => c.email.equals(failedSession.email)})).length, 0);
+  assert.equal((await db.appAuthUsers.findMany({where: c => c.email.eq(failedSession.email)})).length, 0);
 
   const ackID = randomUUID();
   const uncertain = new Auth(observe(port, undefined, undefined, async () => { throw new Error("private commit acknowledgement"); }), [], now, hooks, options);

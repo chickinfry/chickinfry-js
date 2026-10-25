@@ -57,7 +57,7 @@ test("rolling sessions through PostgreSQL", {skip: !url}, async t => {
     const first = await login(auth({idleTimeoutSeconds: 3600}));
     // Rejected refresh commits revocation, so use a twin to leave the cleanup subject untouched.
     const probe = await login(auth({idleTimeoutSeconds: 3600}));
-    const refresh = (await db.appAuthRefreshTokens.findMany({where: c => c.sessionId.equals(first.sessionId)}))[0];
+    const refresh = (await db.appAuthRefreshTokens.findMany({where: c => c.sessionId.eq(first.sessionId)}))[0];
     assert.equal(Date.parse(refresh.expiresAt), start + 3600000);
     const runtime = auth({idleTimeoutSeconds: 31536000}, port, cleanup);
     clock = start + 3600001;
@@ -69,8 +69,8 @@ test("rolling sessions through PostgreSQL", {skip: !url}, async t => {
     assert.ok(await db.appAuthRefreshTokens.findById({id: refresh.id}));
     clock++;
     assert.ok((await cleanupPass(runtime)).includes(first.sessionId), "Expanded idle must eventually select the expired family.");
-    assert.equal(await db.appAuthSessions.findById({id: first.sessionId}), undefined);
-    assert.equal(await db.appAuthRefreshTokens.findById({id: refresh.id}), undefined);
+    assert.equal(await db.appAuthSessions.findById({id: first.sessionId}), null);
+    assert.equal(await db.appAuthRefreshTokens.findById({id: refresh.id}), null);
   });
 
   await t.test("CLEANUP-GROW(b): keyset skips live legacy candidates and wraps within one batch", async () => {
@@ -117,8 +117,8 @@ test("rolling sessions through PostgreSQL", {skip: !url}, async t => {
       }
       assert.deepEqual(await cleanupPass(runtime, dead.id), [dead.id, ids[0]], "A later start must reach the dead family and fill from the front.");
       assert.equal(selections.length, 2);
-      assert.equal(await db.appAuthSessions.findById({id: dead.id}), undefined);
-      assert.equal(await db.appAuthRefreshTokens.findById({id: expired.id}), undefined);
+      assert.equal(await db.appAuthSessions.findById({id: dead.id}), null);
+      assert.equal(await db.appAuthRefreshTokens.findById({id: expired.id}), null);
       for (const {session, refresh} of active) {
         assert.equal((await db.appAuthSessions.findById({id: session.id})).revokedAt, null);
         assert.equal((await db.appAuthRefreshTokens.findById({id: refresh.id})).consumedAt, null);
@@ -137,8 +137,8 @@ test("rolling sessions through PostgreSQL", {skip: !url}, async t => {
         clock++;
         assert.deepEqual(await cleanupPass(runtime, ids[0]), ids, "The shortened idle boundary makes the live families eligible for deletion.");
         for (const {session, refresh} of active) {
-          assert.equal(await db.appAuthSessions.findById({id: session.id}), undefined);
-          assert.equal(await db.appAuthRefreshTokens.findById({id: refresh.id}), undefined);
+          assert.equal(await db.appAuthSessions.findById({id: session.id}), null);
+          assert.equal(await db.appAuthRefreshTokens.findById({id: refresh.id}), null);
         }
       }
     }
@@ -209,7 +209,7 @@ test("rolling sessions through PostgreSQL", {skip: !url}, async t => {
     for (const variant of ["recent", "idle", "stored", "absolute"]) {
       clock = start;
       const first = await login();
-      const refresh = (await db.appAuthRefreshTokens.findMany({where: c => c.sessionId.equals(first.sessionId)}))[0];
+      const refresh = (await db.appAuthRefreshTokens.findMany({where: c => c.sessionId.eq(first.sessionId)}))[0];
       await db.appAuthSessions.update({id: first.sessionId}, {createdAt: new Date(start - 5 * day).toISOString(), firstLoginAt: null, lastRenewedAt: null});
       await db.appAuthRefreshTokens.update({id: refresh.id}, {
         createdAt: new Date(start - (variant === "idle" ? 7200000 : 1800000)).toISOString(),
@@ -391,7 +391,7 @@ test("rolling sessions through PostgreSQL", {skip: !url}, async t => {
     verify();
     const live = await login(runtime);
     const before = await db.appAuthSessions.findById({id: live.sessionId});
-    const old = (await db.appAuthRefreshTokens.findMany({where: c => c.sessionId.equals(live.sessionId)}))[0];
+    const old = (await db.appAuthRefreshTokens.findMany({where: c => c.sessionId.eq(live.sessionId)}))[0];
     clock += 600000;
     fail = true;
     await assert.rejects(runtime.refresh(live.refreshToken), /Fixture insertion failure/);
@@ -455,7 +455,7 @@ test("rolling sessions through PostgreSQL", {skip: !url}, async t => {
       credentials = await runtime.refresh(credentials.refreshToken);
       await Promise.all(tasks.splice(0));
     }
-    assert.equal(await db.appAuthSessions.findById({id: dead.id}), undefined, "Seven-day legacy candidate was starved.");
+    assert.equal(await db.appAuthSessions.findById({id: dead.id}), null, "Seven-day legacy candidate was starved.");
     assert.ok(passes.some(pass => pass.deletions > 0));
     assert.ok(passes.every(pass => pass.deletions <= 8));
     assert.ok(await db.appAuthSessions.findById({id: selectedLive.id}), "Selection alone must not delete a live legacy family.");

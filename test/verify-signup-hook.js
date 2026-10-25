@@ -124,7 +124,7 @@ test("signup hook deadlines isolate PostgreSQL transactions and reused connectio
   const normal = new Auth(port, [provider]), parallel = new Auth(other, [provider]);
   const signup = (auth, subject = randomUUID()) => auth.signinIdentity("deadline", subject);
   const absent = async subject => {
-    assert.equal((await db.appAuthUsers.findMany({where: c => c.email.equals(`${subject}@example.test`)})).length, 0);
+    assert.equal((await db.appAuthUsers.findMany({where: c => c.email.eq(`${subject}@example.test`)})).length, 0);
     assert.equal((await port.query(`select id from "${table}" where id = $1`, [subject])).length, 0);
   };
 

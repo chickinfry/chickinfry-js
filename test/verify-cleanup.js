@@ -75,7 +75,7 @@ try {
   const owner = await auth.signup(email, password);
   const doomed = await auth.signin(email, password);
   await db.appAuthSessions.update({id: doomed.sessionId}, {expiresAt: expired});
-  const doomedRefresh = (await db.appAuthRefreshTokens.findMany({where: c => c.sessionId.equals(doomed.sessionId)}))[0];
+  const doomedRefresh = (await db.appAuthRefreshTokens.findMany({where: c => c.sessionId.eq(doomed.sessionId)}))[0];
   await db.appAuthRefreshTokens.update({id: doomedRefresh.id}, {expiresAt: expired});
   await rejects(auth.session(doomed.accessToken), "invalid_token");
   await rejects(auth.refresh(doomed.refreshToken), "session_revoked");
@@ -113,14 +113,14 @@ try {
   assert.ok(rounds <= 23 && deleted <= 8, "one cleanup pass must not process the entire backlog");
   assert.ok(cleanupMillis >= 1000 && responseMillis < cleanupMillis);
   assert.equal((await auth.session(tokens.accessToken)).id, owner.userId);
-  assert.ok((await db.appAuthInvites.findMany({where: c => c.expiresAt.equals(expired)})).length > 0);
+  assert.ok((await db.appAuthInvites.findMany({where: c => c.expiresAt.eq(expired)})).length > 0);
   console.log(JSON.stringify({risk: "backlog-delay", responseMillis: +responseMillis.toFixed(1), cleanupMillis: +cleanupMillis.toFixed(1), ormQueries: rounds, deleted}));
 
   // Remove the earlier artificial backlog so separate retention and race checks are not obscured by its candidate ordering.
-  for (const row of await db.appAuthRefreshTokens.findMany({where: c => c.expiresAt.equals(expired)})) await db.appAuthRefreshTokens.delete({id: row.id});
-  for (const row of await db.appAuthSessions.findMany({where: c => c.expiresAt.equals(expired)})) await db.appAuthSessions.delete({id: row.id});
-  for (const row of await db.appAuthRateLimits.findMany({where: c => c.expiresAt.equals(expired)})) await db.appAuthRateLimits.delete({action: row.action, keyHash: row.keyHash});
-  for (const row of await db.appAuthInvites.findMany({where: c => c.expiresAt.equals(expired)})) await db.appAuthInvites.delete({id: row.id});
+  for (const row of await db.appAuthRefreshTokens.findMany({where: c => c.expiresAt.eq(expired)})) await db.appAuthRefreshTokens.delete({id: row.id});
+  for (const row of await db.appAuthSessions.findMany({where: c => c.expiresAt.eq(expired)})) await db.appAuthSessions.delete({id: row.id});
+  for (const row of await db.appAuthRateLimits.findMany({where: c => c.expiresAt.eq(expired)})) await db.appAuthRateLimits.delete({action: row.action, keyHash: row.keyHash});
+  for (const row of await db.appAuthInvites.findMany({where: c => c.expiresAt.eq(expired)})) await db.appAuthInvites.delete({id: row.id});
 
   // An expired access token paired with a live refresh token is preserved regardless of parent lock acquisition order.
   for (const refreshFirst of [true, false]) {
@@ -157,7 +157,7 @@ try {
     await new Auth(port, [], now, {}, {}, context()).signup(`retention-${randomUUID()}@example.test`, password);
     await drain();
     assert.equal((await auth.session(refreshed.accessToken)).sessionId, live.sessionId);
-    const children = await db.appAuthRefreshTokens.findMany({where: c => c.sessionId.equals(live.sessionId)});
+    const children = await db.appAuthRefreshTokens.findMany({where: c => c.sessionId.eq(live.sessionId)});
     assert.equal(children.length, 2);
     assert.equal(children.filter(row => row.consumedAt !== null).length, 1);
     await rejects(auth.refresh(live.refreshToken), "session_revoked");
