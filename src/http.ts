@@ -1,3 +1,6 @@
+import {createDevice, failure} from "./device.js";
+import type {Device} from "./device.js";
+
 export interface ClientTransport {
   invoke(operation: string, input: Readonly<Record<string, unknown>>): Promise<unknown>;
 }
@@ -6,19 +9,59 @@ const sessionRefreshes = new WeakMap<object, Map<string, Promise<string>>>();
 
 export class OperationError extends Error {
   constructor(readonly code: string, readonly status: number) {
-    super(`Operation failed (${code}, HTTP ${status}).`);
+    super(storageMessages[code] ?? `Operation failed (${code}, HTTP ${status}).`);
     this.name = "OperationError";
   }
+}
+
+const storageMessages: Readonly<Record<string, string>> = {
+  device_storage_unavailable: "Could not use device storage for the session. Check that the storage location is writable, or set persist to another directory or turn it off.",
+  device_storage_corrupt: "Stored session data could not be read. Sign out to clear it, then sign in again.",
+  device_storage_full: "Device storage for sign-in is full. Finish or cancel pending sign-ups, then try again.",
+  device_storage_version_unsupported: "Stored session data was written by a newer SDK. Update the SDK, or sign out and sign in again.",
+};
+
+/** Authentication and device persistence settings for an operation transport. */
+export interface TransportOptions {
+  readonly token?: string;
+  readonly persist?: false | {readonly dir: string};
+}
+
+function prepareDevice(transport: object, origin: string, configuration: ReturnType<typeof createDevice>, browser: boolean, token?: string) {
+  try {
+    const options = {persist: configuration.persist};
+    let attached = false;
+    for (const key of [Symbol.for("chickinfry.store.scope.v1"), Symbol.for("chickinfry.store.public.v1")]) {
+      const descriptor = Object.getOwnPropertyDescriptor(transport, key);
+      if (!descriptor) {if (Reflect.has(transport, key)) throw failure(); continue;}
+      if (!("value" in descriptor) || descriptor.value === undefined) throw failure();
+      Reflect.set(options, key, descriptor.value); attached = true;
+    }
+    if (!attached) return configuration;
+    return createDevice(origin, options, browser, token, configuration);
+  } catch {throw failure();}
 }
 
 export class HTTP implements ClientTransport {
   private readonly origin: string;
   private sessionStore: SessionStore | undefined;
   private refreshes = new Map<string, Promise<string>>();
+  private readonly token: string | undefined;
+  private device: Device | undefined;
+  private configuration: ReturnType<typeof createDevice>;
 
-  constructor(origin: string, private readonly token?: string) {
+  constructor(origin: string, token?: string);
+  constructor(origin: string, options?: TransportOptions);
+  constructor(origin: string, tokenOrOptions?: string | TransportOptions) {
+    if (tokenOrOptions !== undefined && typeof tokenOrOptions !== "string" &&
+        (typeof tokenOrOptions !== "object" || tokenOrOptions === null || Array.isArray(tokenOrOptions))) throw new Error("Invalid access token.");
+    const options = typeof tokenOrOptions === "object" && tokenOrOptions !== null ? tokenOrOptions : {};
+    const token = typeof tokenOrOptions === "string" ? tokenOrOptions : options.token;
     if (token !== undefined && !validToken(token)) throw new Error("Invalid access token.");
+    this.token = token;
     this.origin = operationOrigin(origin);
+    this.configuration = createDevice(this.origin, options, false, token);
+    this.device = this.configuration.device;
   }
 
   withBearer(token: string): HTTP {
@@ -40,6 +83,10 @@ export class HTTP implements ClientTransport {
   }
 
   async invoke(operation: string, input: Readonly<Record<string, unknown>>): Promise<unknown> {
+    this.configuration = prepareDevice(this, this.origin, this.configuration, false, this.token);
+    this.device = this.configuration.device;
+    if (this.device) return this.device.invoke(operation, input, (operation, input, token) => this.invokeOnce(operation, input, token),
+      this.configuration.publicOperations?.includes(operation));
     const store = this.sessionStore;
     if (!store) return this.invokeOnce(operation, input, this.token);
     let credentials = {...store.credentials()};
@@ -172,13 +219,28 @@ function readCredentials(value: unknown): SessionCredentials {
   return {accessToken,refreshToken,expiresAt,refreshExpiresAt,userId,sessionId};
 }
 
-/** Cookie-only transport with no refresh, credential storage, or replay. */
+/** Cookie-only transport with no token storage, refresh, or operation replay. */
 export class BrowserHTTP implements ClientTransport {
   private readonly origin: string;
-  constructor(origin: string) { this.origin = operationOrigin(origin); }
-  invoke(operation: string, input: Readonly<Record<string, unknown>>): Promise<unknown> {
+  private device: Device | undefined;
+  private configuration: ReturnType<typeof createDevice>;
+  constructor(origin: string);
+  constructor(origin: string, options?: Omit<TransportOptions, "token">);
+  constructor(origin: string, options: Omit<TransportOptions, "token"> = {}) {
+    this.origin = operationOrigin(origin);
+    this.configuration = createDevice(this.origin, options, true, Reflect.get(options, "token"));
+    this.device = this.configuration.device;
+  }
+  async invoke(operation: string, input: Readonly<Record<string, unknown>>): Promise<unknown> {
+    this.configuration = prepareDevice(this, this.origin, this.configuration, true);
+    this.device = this.configuration.device;
+    if (this.device) return this.device.invoke(operation, input, (operation, input, _token, anonymous) => this.invokeOnce(operation, input, anonymous),
+      this.configuration.publicOperations?.includes(operation));
+    return this.invokeOnce(operation, input);
+  }
+  private invokeOnce(operation: string, input: Readonly<Record<string, unknown>>, anonymous = false): Promise<unknown> {
     return invokeHTTP(this.origin, operation, input,
-      new Headers({"content-type": "application/json", "x-chik-browser": "1"}), "include");
+      new Headers({"content-type": "application/json", "x-chik-browser": "1"}), anonymous ? "omit" : "include");
   }
 }
 

@@ -83,6 +83,63 @@ Tabs in the same browser profile share cookies, including when several people us
 
 Local HTTP browser sessions work in Chromium and Firefox; Safari/WebKit does not store this Secure cookie on local HTTP. Use the existing local endpoint without weakening cookie attributes. Remote browser sessions require a same-site HTTPS frontend and API; local browser results do not establish production ingress support.
 
+### Device persistence
+
+Generated SDKs with device persistence enabled keep sessions and pending signup
+attempts across reloads and restarts by default. Upgrade the generator and runtime
+together. Standalone `new HTTP(origin)` and `new BrowserHTTP(origin)` retain their
+stateless behavior. Explicit bearer tokens and custom `SessionStore` values are
+never copied into the default device store.
+
+The second HTTP argument accepts the existing token string or `TransportOptions`:
+
+```ts
+new HTTP(origin, token);
+new HTTP(origin, {token, persist: false});
+new HTTP(origin, {persist: {dir: "./private-state"}});
+new BrowserHTTP(origin, {persist: false});
+```
+
+Generated browser clients accept the same `persist` option through
+`createBrowserClient(origin, options)`. Browser transports reject tokens and
+`persist: {dir}`. `persist: false` keeps generated authentication state in memory
+only. A standalone Node transport with an explicit directory uses that directory
+and isolates its records by API origin. Relative directories are fixed against
+the working directory at construction; empty directories are rejected.
+
+Browsers store pending attempts and server-confirmed, noncredential session
+metadata in the app origin's localStorage. Passwords, verification codes, access
+and refresh tokens, and HttpOnly cookie contents are never stored there. Each
+signup screen retains its own attempt; another tab's latest attempt is not used.
+Attempts are retained for at most 24 hours from the original request start, with
+up to three persisted attempts per app and API project. Verification removes
+attempts for the same email, and logout removes the current app's sessions and
+pending attempts. Browser storage is accessible to scripts on that origin and
+can be blocked, evicted, or cleared. Web Locks coordinate device writes when
+available; without them, one localStorage write is atomic but the full
+read/compare/write sequence is not guaranteed across tabs. Cookie response
+ordering remains independent of device storage.
+
+Node uses private files under the user's state directory: XDG state home on
+Linux (otherwise `~/.local/state`), Application Support on macOS, and LocalAppData
+on Windows. Newly created directories use 0700 and files use 0600 on POSIX;
+Windows uses the current user's ACL. These are plaintext files protected by OS
+permissions, not encryption. Writes flush a temporary file, replace the JSON
+bundle atomically, and flush its directory on POSIX. Windows skips directory
+flush; power-loss durability is not confirmed. The built-in `node:sqlite` module
+provides only the lock, requires no npm dependency, and is loaded only for Node
+file storage. Node 22 emits its `ExperimentalWarning` once on first load.
+
+If the server succeeds but saving fails, authentication succeeds for the current
+client in memory; restart persistence is not guaranteed. Authentication is never
+repeated to repair a storage failure. A refresh or account switch that cannot
+save its required safety marker is not sent. An interrupted refresh or account
+switch requires a new sign-in after restart. Logout deletion failures remain
+errors. Corrupt data and records written by a newer SDK are preserved and blocked
+instead of silently reset. Storage failures use `OperationError` with status `0`
+and `device_storage_unavailable`, `device_storage_corrupt`, `device_storage_full`,
+or `device_storage_version_unsupported`.
+
 ### Email verification and password reset
 
 Email behavior is opt-in at the runtime boundary. With no email options, signup still issues a session immediately, duplicate addresses return `account_exists` (409), and no mail is sent. A generator can enable verification explicitly with `email: {verification: "required"}`; the runtime requires an injected `AuthMailer` and an HTTPS `emailLinkBase` (HTTP loopback is allowed for development). Apply the generated email authentication migration before enabling these options.
