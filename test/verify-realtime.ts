@@ -5,7 +5,7 @@ import {createRequire} from "node:module";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {fileURLToPath, pathToFileURL} from "node:url";
-import {createRealtimeClient} from "../dist/realtime/client.js";
+import {createRealtimeClient, sessionRenewal} from "../dist/realtime/client.js";
 import {ClientError, HttpTransport, MemoryStore, type SessionCredentials} from "../dist/http.js";
 
 const consumer = mkdtempSync(join(tmpdir(), "chickinfry-realtime-"));
@@ -85,8 +85,8 @@ const store = {
   clear: async (expected: SessionCredentials) => { assert.fail("Successful renewal cleared the session."); },
 };
 const transport = new HttpTransport("https://example.com").withSession(store);
-const renewal = transport.sessionRenewal()!;
-const otherRenewal = new HttpTransport("https://example.com").withSession(store).sessionRenewal()!;
+const renewal = sessionRenewal(transport)!;
+const otherRenewal = sessionRenewal(new HttpTransport("https://example.com").withSession(store))!;
 const originalFetch = globalThis.fetch;
 let refreshes = 0;
 globalThis.fetch = async (input, init) => {
@@ -98,7 +98,7 @@ globalThis.fetch = async (input, init) => {
     user_id:credentials.userId, session_id:credentials.sessionId});
 };
 try {
-  assert.equal(transport.sessionRenewal(), renewal);
+  assert.equal(sessionRenewal(transport), renewal);
   assert.equal(renewal.dueAt(), Date.parse(credentials.expiresAt));
   await Promise.all([renewal.renew(), otherRenewal.renew()]);
   assert.equal(refreshes, 1);

@@ -1,6 +1,42 @@
-import type {Transport, SessionRenewal} from "../http.js";
-import { ClientError, OperationError } from "../http.js";
+import type {Transport} from "../http.js";
+import { ClientError, HttpTransport, OperationError } from "../http.js";
 import { parseServerFrame, validChannel, validCursor } from "./protocol.js";
+
+export interface SessionRenewal {
+  dueAt(): number | undefined;
+  renew(): Promise<void>;
+}
+
+export interface RealtimeTransport extends Transport {
+  sessionRenewal?(): SessionRenewal | undefined;
+}
+
+const transportRenewals = new WeakMap<HttpTransport, SessionRenewal>();
+
+export function sessionRenewal(transport: RealtimeTransport): SessionRenewal | undefined {
+  if (transport.sessionRenewal !== undefined) return transport.sessionRenewal();
+  if (!(transport instanceof HttpTransport)) return undefined;
+  // This private package shares its checkout's refresh path without adding public transport members.
+  const store = transport["sessionStore"];
+  if (!store) return undefined;
+  let renewal = transportRenewals.get(transport);
+  if (renewal === undefined) {
+    const credentials = () => {
+      try { return store.credentials(); }
+      catch (error) { throw error instanceof ClientError ? error : new ClientError("failed_precondition"); }
+    };
+    renewal = {
+      dueAt: () => {
+        const expiresAt = Date.parse(credentials().expiresAt);
+        if (!Number.isFinite(expiresAt)) throw new Error("Invalid session expiry.");
+        return expiresAt;
+      },
+      renew: async () => { await transport["refreshSession"](store, {...credentials()}); },
+    };
+    transportRenewals.set(transport, renewal);
+  }
+  return renewal;
+}
 
 export type RealtimeMessage =
   | { readonly type: "event"; readonly channel: string; readonly cursor: string; readonly previous: string; readonly payload: unknown }
@@ -69,8 +105,8 @@ function scheduleRenewal(renewal: SessionRenewal, shared: SharedRenewal): void {
   }, Math.min(Math.max(expiresAt - renewalMarginMs - Date.now(), 0), maxTimeoutMs));
 }
 
-export function createRealtimeClient(transport: Transport): RealtimeClient {
-  const renewal = transport.sessionRenewal?.();
+export function createRealtimeClient(transport: RealtimeTransport): RealtimeClient {
+  const renewal = sessionRenewal(transport);
   return {
     subscribe(channel: string, options?: { readonly cursor?: string }): RealtimeSubscription {
       if (!validChannel(channel)) throw new Error("Invalid realtime channel.");

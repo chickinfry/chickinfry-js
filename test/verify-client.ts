@@ -1,5 +1,24 @@
 import {strict as assert} from "node:assert";
+import {readFileSync} from "node:fs";
 import * as sdk from "../src/index.js";
+
+function publicSurface(entry: URL, files: Record<string, string> = {}): {exports: string[]; files: Record<string, string>} {
+  const name = entry.pathname.split("/").pop()!;
+  if (!(name in files)) {
+    const text = readFileSync(entry, "utf8").replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^ +(?:private |protected |#private;).*\n/gm, "").trim();
+    files[name] = text;
+    for (const match of text.matchAll(/^export \* from "(\.[^"]+)\.js";$/gm)) {
+      publicSurface(new URL(match[1] + ".d.ts", entry), files);
+    }
+  }
+  return {exports: Object.values(files).flatMap(text =>
+    [...text.matchAll(/^export (?:declare )?(?:class|interface|type|function|const) (\w+)/gm)].map(match => match[1])).sort(), files};
+}
+const surface = publicSurface(new URL("../dist/index.d.ts", import.meta.url));
+const expected = JSON.parse(readFileSync(new URL("./public-surface.json", import.meta.url), "utf8"));
+assert.deepEqual(surface.exports, expected.exports, "The compiled public exports must match the published surface.");
+assert.deepEqual(surface.files, expected.files, "The compiled public declarations, including class members, must match the published surface.");
 
 assert.deepEqual(Object.keys(sdk).filter(name => /realtime/i.test(name)), [], "The public root must not export realtime.");
 for (const [name, value] of Object.entries(sdk)) {
