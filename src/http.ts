@@ -1,8 +1,14 @@
 import {createDevice, failure} from "./device.js";
 import type {Device} from "./device.js";
 
+export interface SessionRenewal {
+  dueAt(): number | undefined;
+  renew(): Promise<void>;
+}
+
 export interface Transport {
   invoke(operation: string, input: Readonly<Record<string, unknown>>): Promise<unknown>;
+  sessionRenewal?(): SessionRenewal | undefined;
 }
 
 const sessionRefreshes = new WeakMap<object, Map<string, Promise<string>>>();
@@ -50,6 +56,7 @@ export class ClientError extends Error {
 export class HttpTransport implements Transport {
   private readonly origin: string;
   private sessionStore: SessionStore | undefined;
+  private renewal: SessionRenewal | undefined;
   private refreshes = new Map<string, Promise<string>>();
   private readonly token: string | undefined;
   private readonly timeout: number;
@@ -87,6 +94,19 @@ export class HttpTransport implements Transport {
     sessionRefreshes.set(store, copy.refreshes);
     copy.sessionStore = store;
     return copy;
+  }
+
+  sessionRenewal(): SessionRenewal | undefined {
+    const store = this.sessionStore;
+    if (!store) return undefined;
+    return this.renewal ??= {
+      dueAt: () => {
+        const expiresAt = Date.parse(sessionCredentials(store).expiresAt);
+        if (!Number.isFinite(expiresAt)) throw new Error("Invalid session expiry.");
+        return expiresAt;
+      },
+      renew: async () => { await this.refreshSession(store, {...sessionCredentials(store)}); },
+    };
   }
 
   async invoke(operation: string, input: Readonly<Record<string, unknown>>): Promise<unknown> {

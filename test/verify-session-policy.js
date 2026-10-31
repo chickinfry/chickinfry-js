@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { sessionPolicy, sessionExpiry, sessionState, cleanupCandidates, cookieMaxAge } from "../dist/auth/policy.js";
+import { Auth } from "../dist/auth/runtime.js";
 import { authOperations, invokeAuth, browserRequest } from "../dist/auth/index.js";
 
 const hour = 3600000, day = 24 * hour;
@@ -130,4 +131,56 @@ test("pure session decisions produce the same output with identical inputs and n
     assert.equal(cookieMaxAge(sessionPolicy(), now, now), 34560000);
   } finally { Date.now = original; }
   assert.deepEqual(input, {...session, firstLoginAt: session.createdAt, lastRenewedAt: latest.createdAt});
+});
+
+test("realtime revalidation follows request policy for expiry, renewal and lock waits", async () => {
+  const id = "22222222-2222-4222-8222-222222222222", userId = "11111111-1111-4111-8111-111111111111";
+  for (const transport of ["native", "browser"]) {
+    for (const scenario of ["live", "idle", "absolute", "stored", "access", "lock-wait"]) {
+      if (transport === "browser" && scenario === "access") continue;
+      const outcomes = [];
+      for (const realtime of [false, true]) {
+        let clock = now, locked = false;
+        const row = {id, user_id: userId, token_hash: "a".repeat(64), transport, user_session_version: 1,
+          created_at: at(now - hour), first_login_at: at(now - hour), last_renewed_at: at(now - hour / 2),
+          expires_at: at(now + (scenario === "stored" || scenario === "access" ? -1 : hour)), revoked_at: null};
+        const refresh = {id: "33333333-3333-4333-8333-333333333333", session_id: id, token_hash: "b".repeat(64),
+          created_at: row.last_renewed_at, expires_at: at(now + (scenario === "stored" ? -1 : hour)), consumed_at: null};
+        const user = {id: userId, email: "fixture@example.test", session_version: 1, created_at: row.created_at,
+          disabled_at: null, email_verified_at: null, password_hash: null};
+        const writes = [];
+        const port = {
+          async query(sql, args) {
+            if (sql.startsWith("update")) {
+              if (!locked) {
+                locked = true;
+                if (scenario === "lock-wait") clock += hour / 2;
+              } else writes.push({sql, args});
+            }
+            return [sql.includes('"app_auth_sessions"') ? row : sql.includes('"app_auth_refresh_tokens"') ? refresh : user];
+          },
+          async transaction(work) { return work(port); },
+        };
+        const auth = new Auth(port, [], () => clock, {}, {session: {idleTimeoutSeconds: 3600,
+          absoluteLifetimeSeconds: scenario === "absolute" ? 3600 : 0}});
+        if (scenario === "idle") clock += hour / 2;
+        const request = realtime ? auth.revalidateSession(id, userId, transport) : auth.session("a".repeat(43), transport);
+        const expired = ["idle", "absolute", "stored", "lock-wait"].includes(scenario);
+        if (expired || transport === "native" && scenario === "access") {
+          await assert.rejects(request, {code: "invalid_token"});
+          if (expired) assert.ok(writes.some(({sql, args}) => sql.includes('"revoked_at" = $1') && args[0] === at(clock)));
+          else assert.deepEqual(writes, []);
+        } else {
+          const result = await request;
+          assert.equal(result.expiresAt, transport === "browser" ? at(clock + hour) : at(now + hour / 2));
+          if (transport === "browser") {
+            assert.equal(writes.length, 1);
+            assert.deepEqual(writes[0].args.slice(0, 3), [at(clock + hour), row.first_login_at, at(clock)]);
+          } else assert.deepEqual(writes, []);
+          outcomes.push(result);
+        }
+      }
+      if (outcomes.length) assert.deepEqual(outcomes[0], outcomes[1]);
+    }
+  }
 });

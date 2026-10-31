@@ -1,5 +1,13 @@
 import {strict as assert} from "node:assert";
-import * as sdk from "../src/http.js";
+import * as sdk from "../src/index.js";
+
+assert.deepEqual(Object.keys(sdk).filter(name => /realtime/i.test(name)), [], "The public root must not export realtime.");
+for (const [name, value] of Object.entries(sdk)) {
+  if (typeof value === "function" && value.prototype) {
+    assert.deepEqual(Object.getOwnPropertyNames(value.prototype).filter(method => /realtime/i.test(method)), [],
+      `${name} must not expose realtime methods.`);
+  }
+}
 
 const originalFetch = globalThis.fetch;
 const local = (code: string, status: number | undefined, outcomeUnknown = false) => (error: unknown) => {

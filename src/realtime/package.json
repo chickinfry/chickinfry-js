@@ -1,0 +1,9 @@
+{
+  "name": "@chickinfry/chickinfry-realtime",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./client.js"
+  }
+}

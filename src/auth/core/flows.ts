@@ -318,9 +318,9 @@ export class Flows {
     return session && this.validateSession(tx, session);
   }
 
-  async commitRevalidateSession(tx: Store, sessionId: string, userId: string) {
+  async commitRevalidateSession(tx: Store, sessionId: string, userId: string, transport: SessionTransport = "native") {
     const candidate = await tx.session(sessionId);
-    if (candidate?.userId !== userId || candidate.transport !== "native") return undefined;
+    if (candidate?.userId !== userId || candidate.transport !== transport) return undefined;
     const session = await this.lockSession(tx, candidate);
     return session && this.validateSession(tx, session);
   }

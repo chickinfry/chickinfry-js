@@ -381,9 +381,9 @@ export class Auth {
     return result;
   }
 
-  /** Revalidates an already authenticated native connection; session IDs cannot establish a login. */
-  async revalidateSession(sessionId: string, userId: string): Promise<{ id: string; email: string; sessionId: string; expiresAt: string; emailVerified: boolean }> {
-    const result = await this.port.transaction(port => this.flows.commitRevalidateSession(createStore(port), sessionId, userId));
+  /** Revalidates an already authenticated connection; session IDs cannot establish a login. */
+  async revalidateSession(sessionId: string, userId: string, transport: SessionTransport = "native"): Promise<{ id: string; email: string; sessionId: string; expiresAt: string; emailVerified: boolean }> {
+    const result = await this.port.transaction(port => this.flows.commitRevalidateSession(createStore(port), sessionId, userId, transport));
     if (!result) throw new AuthError("invalid_token", 401);
     return result;
   }
