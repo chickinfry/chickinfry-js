@@ -9,6 +9,7 @@ import {test} from "node:test";
 import {createServer} from "node:http";
 import {HttpTransport, BrowserHttpTransport, ClientError, OperationError} from "../src/http.js";
 import type {TransportOptions} from "../src/http.js";
+import type {Store} from "../src/device.js";
 
 const origin = "https://api.example.com";
 const scopeKey = Symbol.for("chickinfry.store.scope.v1");
@@ -262,7 +263,9 @@ if (process.argv[2]) {
     } finally { globalThis.fetch = originalFetch; await chmod(dir, 0o700); await rm(dir, {recursive: true}); }
   });
 
-  for (const duringCleanup of [false, true]) test(`rejects an E1 account change ${duringCleanup ? "during" : "before"} expired attempt cleanup`, {skip: process.platform === "win32"}, async () => {
+  for (const [duringCleanup, applied] of [[false, false], [true, false], [true, true]]) test(
+    `rejects an E1 account change ${duringCleanup ? "during" : "before"} expired attempt cleanup` +
+      (applied ? " (post-commit failure)" : ""), {skip: process.platform === "win32"}, async context => {
     const dir = await mkdtemp(join(tmpdir(), "device-memory-expiry-"));
     const sessions = [credential(), credential(), credential()];
     let signins = 0;
@@ -271,7 +274,7 @@ if (process.argv[2]) {
       const operation = new URL(String(url)).pathname;
       if (operation === "/auth.signin") {
         const session = sessions[signins++];
-        if (signins === 2) await chmod(dir, 0o500);
+        if (signins === 2 && !applied) await chmod(dir, 0o500);
         return Response.json(session);
       }
       if (operation === "/auth.signup") return Response.json({accepted: true, attempt: randomUUID()});
@@ -286,20 +289,38 @@ if (process.argv[2]) {
       await new HttpTransport(origin, options).invoke("auth.signup", {email: "pending@example.com"});
       const file = join(dir, (await readdir(dir)).find(name => name.endsWith(".json"))!);
       const attempt = JSON.parse(await readFile(file, "utf8")).attempts[0];
-      const expire = async () => {
+      const expire = async (startedAt = Date.now() - 86_400_000) => {
         const bundle = JSON.parse(await readFile(file, "utf8"));
-        bundle.attempts = [{...attempt, startedAt: Date.now() - 86_400_000}];
+        bundle.attempts = [{...attempt, startedAt}];
         bundle.selections[attempt.screen] = attempt.sequence;
         await writeFile(file, JSON.stringify(bundle), {mode: 0o600});
       };
       const client = new HttpTransport(origin, options);
+      if (applied) {
+        await expire(Date.now() - 86_400_000 + 60_000);
+        const device = Reflect.get(client, "device"), store: Store = await device.storage();
+        let fail = true;
+        Reflect.set(device, "store", Promise.resolve({read: () => store.read(), async swap(expected, raw, reset) {
+          const written = await store.swap(expected, raw, reset);
+          if (written && fail && JSON.parse(raw).session?.accessToken === sessions[1].access_token) {
+            fail = false; throw new ClientError("failed_precondition");
+          }
+          return written;
+        }} satisfies Store));
+      }
       await client.invoke("auth.signin", {});
-      await client.invoke("notes.list", {});
-      assert.ok(accounts.length === 1 && accounts[0] === sessions[1].user_id);
+      if (applied) {
+        assert.ok(Reflect.get(Reflect.get(client, "device"), "memory"));
+        const now = Date.now() + 120_000;
+        context.mock.method(Date, "now", () => now);
+      } else {
+        await client.invoke("notes.list", {});
+        assert.ok(accounts.length === 1 && accounts[0] === sessions[1].user_id);
+      }
       accounts.length = 0;
       await chmod(dir, 0o700);
       if (duringCleanup) {
-        await expire();
+        if (!applied) await expire();
         const device = Reflect.get(client, "device"), read = device.read.bind(device);
         let reads = 0;
         device.read = async () => {
@@ -831,6 +852,587 @@ if (process.argv[2]) {
     } finally {globalThis.fetch = originalFetch; await rm(dir, {recursive: true});}
   });
 
+  async function rejoinFixture() {
+    const dir = await mkdtemp(join(tmpdir(), "device-rejoin-"));
+    const first = credential(), verified = credential(), rotated = {...credential(), user_id: first.user_id, session_id: first.session_id};
+    const attempts = new Map<string, string>();
+    const calls = {signup: 0, signin: 0, verify: 0, refresh: 0, reset: 0, protected: 0};
+    let sentAccess: string | null = null, sentAttempt: string | undefined;
+    let onSignup: (() => Promise<void>) | undefined, onSignin: (() => Promise<void>) | undefined;
+    let onRefresh: (() => Promise<void>) | undefined, onReset: (() => Promise<void>) | undefined;
+    globalThis.fetch = async (url, init) => {
+      const operation = new URL(String(url)).pathname, input = JSON.parse(String(init?.body));
+      if (operation === "/auth.signin") {const session = {...first}; calls.signin++; await onSignin?.(); return Response.json(session);}
+      if (operation === "/auth.verify_email") {calls.verify++; return Response.json(verified);}
+      if (operation === "/auth.refresh") {calls.refresh++; await onRefresh?.(); return Response.json(rotated);}
+      if (operation === "/auth.signup") {
+        calls.signup++; await onSignup?.();
+        const attempt = randomUUID(); attempts.set(input.email, attempt);
+        return Response.json({accepted: true, attempt});
+      }
+      if (["/auth.request_password_reset", "/auth.reset_password"].includes(operation)) {
+        calls.reset++; await onReset?.(); return Response.json({accepted: true});
+      }
+      if (operation === "/notes.list") calls.protected++;
+      sentAttempt = input.attempt;
+      sentAccess = new Headers(init?.headers).get("authorization");
+      return Response.json({ok: true});
+    };
+    const a = new HttpTransport(origin, scoped("a", {persist: {dir}}));
+    /** Different path spellings share the file but model separate process refresh flights. */
+    const b = new HttpTransport(origin, scoped("b", {persist: {dir: dir + "/."}}));
+    await a.invoke("auth.signin", {});
+    const device = Reflect.get(a, "device"), store: Store = await device.storage();
+    const writes: {expected: string | null; value: any}[] = [];
+    let reject: ((candidate: any) => boolean) | undefined, afterWrite = false, readsUntilFailure: number | undefined;
+    Reflect.set(device, "store", Promise.resolve({async read() {
+      if (readsUntilFailure !== undefined && readsUntilFailure-- === 0) {
+        readsUntilFailure = undefined; throw new ClientError("failed_precondition");
+      }
+      return store.read();
+    }, async swap(expected, raw, reset) {
+      writes.push({expected, value: JSON.parse(raw)});
+      if (reject?.(JSON.parse(raw))) {
+        reject = undefined;
+        if (afterWrite) assert.ok(await store.swap(expected, raw, reset));
+        throw new ClientError("failed_precondition");
+      }
+      return store.swap(expected, raw, reset);
+    }} satisfies Store));
+    const read = async () => JSON.parse((await store.read())!);
+    const peer = async (change: (bundle: any) => void) => {
+      const raw = await store.read(), value = JSON.parse(raw!);
+      change(value); value.revision = String(BigInt(value.revision) + 1n);
+      assert.ok(await store.swap(raw, JSON.stringify(value)));
+    };
+    return {a, b, dir, device, store, first, verified, rotated, attempts, calls, read, peer, writes,
+      access: () => sentAccess, attempt: () => sentAttempt,
+      failReadAfter: (successfulReads: number) => {readsUntilFailure = successfulReads;},
+      fail: (predicate: (candidate: any) => boolean, applied = false) => {reject = predicate; afterWrite = applied;},
+      signupHook: (hook?: () => Promise<void>) => {onSignup = hook;},
+      signinHook: (hook?: () => Promise<void>) => {onSignin = hook;},
+      refreshHook: (hook?: () => Promise<void>) => {onRefresh = hook;},
+      resetHook: (hook?: () => Promise<void>) => {onReset = hook;},
+      async memorySignup(applied = true) {
+        const before = (await read()).attempts.length;
+        afterWrite = applied; reject = candidate => candidate.attempts.length > before;
+        await a.invoke("auth.signup", {email: "memory@example.com"});
+        assert.ok(Reflect.get(device, "memory"));
+      },
+      async close() {globalThis.fetch = originalFetch; await rm(dir, {recursive: true});},
+    };
+  }
+  const locallyUnauthenticated = (error: unknown) => error instanceof ClientError &&
+    error.code === "unauthenticated" && error.status === undefined;
+
+  for (const operation of ["auth.signin", "auth.signup", "auth.request_password_reset", "auth.reset_password"]) test(
+    "STORE-REJOIN explicit authentication clears observed peer marks" + (operation === "auth.signin" ? "" : ` (${operation})`), async () => {
+    const f = await rejoinFixture(), peerStarted = deferred<void>(), peerResponse = deferred<void>();
+    const started = deferred<void>(), response = deferred<void>();
+    let peer: Promise<unknown> | undefined, request: Promise<unknown> | undefined, timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await f.memorySignup();
+      const resetting = operation.includes("password"), previous = {...f.first};
+      if (resetting) {
+        f.refreshHook(async () => {peerStarted.resolve(); await peerResponse.promise;});
+        /** Share the refresh flight to exercise the reset wait before snapshot. */
+        const client = new HttpTransport(origin, scoped("peer", {persist: {dir: f.dir}}));
+        peer = client.invoke("auth.refresh", {refresh_token: previous.refresh_token});
+      } else {
+        Object.assign(f.first, credential());
+        f.signinHook(async () => {peerStarted.resolve(); await peerResponse.promise;});
+        peer = f.b.invoke("auth.signin", {});
+      }
+      await peerStarted.promise;
+      const before = await f.store.read(), saved = JSON.parse(before!);
+      assert.ok(resetting ? saved.refresh : saved.pending.length === 1);
+      assert.ok(Reflect.get(f.device, "memory"));
+      if (operation === "auth.signin") {
+        await assert.rejects(f.a.invoke("notes.list", {}), locallyUnauthenticated);
+        assert.ok(!Reflect.get(f.device, "memory"));
+        Object.assign(f.first, credential());
+      }
+      const hold = async () => {started.resolve(); await response.promise;};
+      if (operation === "auth.signin") f.signinHook(hold);
+      else if (operation === "auth.signup") f.signupHook(hold);
+      else f.resetHook(hold);
+      const calls = operation === "auth.signin" ? f.calls.signin : operation === "auth.signup" ? f.calls.signup : f.calls.reset;
+      const writes = f.writes.length;
+      request = f.a.invoke(operation, {email: "next@example.com"});
+      await Promise.race([started.promise, new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error("Explicit authentication waited for the peer response.")), 5000);
+      })]);
+      clearTimeout(timeout);
+      const cleared = await f.read();
+      assert.equal(cleared.authGeneration, String(BigInt(saved.authGeneration) + 1n));
+      assert.deepEqual(cleared.pending, []); assert.equal(cleared.refresh, undefined); assert.equal(cleared.session, undefined);
+      assert.deepEqual(cleared.attempts, saved.attempts); assert.ok(!Reflect.get(f.device, "memory"));
+      const cleanup = f.writes.slice(writes).find(write => write.value.authGeneration === cleared.authGeneration)!;
+      assert.ok(cleanup && cleanup.expected !== null);
+      assert.deepEqual(cleanup.value.selections, saved.selections);
+      assert.equal(JSON.parse(cleanup.expected).authGeneration, saved.authGeneration);
+      assert.ok(resetting ? JSON.parse(cleanup.expected).refresh === saved.refresh :
+        JSON.parse(cleanup.expected).pending.includes(saved.pending[0]));
+      assert.equal(operation === "auth.signin" ? f.calls.signin : operation === "auth.signup" ? f.calls.signup : f.calls.reset, calls + 1);
+      const raw = await f.store.read();
+      peerResponse.resolve(); await peer;
+      assert.equal(await f.store.read(), raw, "The late peer response must install nothing.");
+      response.resolve(); await request;
+      if (operation === "auth.signin") {
+        assert.equal((await f.read()).session.userId, f.first.user_id);
+        await f.a.invoke("notes.list", {});
+        assert.equal(f.access(), "Bearer " + f.first.access_token);
+      } else {
+        await assert.rejects(f.a.invoke("notes.list", {}), locallyUnauthenticated);
+        assert.equal(f.calls.protected, 0);
+        if (operation === "auth.signup") {
+          await f.a.invoke("auth.verify_email", {attempt: f.attempts.get("next@example.com"), code: "123456"});
+          assert.equal((await f.read()).session.userId, f.verified.user_id);
+        }
+      }
+    } finally {
+      clearTimeout(timeout); peerResponse.resolve(); response.resolve();
+      await peer?.catch(() => {}); await request?.catch(() => {}); await f.close();
+    }
+  });
+
+  test("STORE-REJOIN explicit authentication clears observed peer marks (start write failure)", async () => {
+    const f = await rejoinFixture();
+    try {
+      await f.memorySignup();
+      f.signinHook(async () => {throw new ClientError("unavailable", undefined, true);});
+      await assert.rejects(f.b.invoke("auth.signin", {}));
+      const saved = await f.read(), calls = f.calls.signin;
+      assert.equal(saved.pending.length, 1);
+      f.fail(value => value.authGeneration !== saved.authGeneration);
+      await assert.rejects(f.a.invoke("auth.signin", {}), unavailable);
+      const after = await f.read();
+      assert.equal(f.calls.signin, calls);
+      assert.equal(after.authGeneration, saved.authGeneration); assert.deepEqual(after.pending, saved.pending);
+      assert.deepEqual(after.session, saved.session);
+    } finally {await f.close();}
+  });
+
+  test("STORE-REJOIN explicit authentication clears observed peer marks (stale observation keeps reset waiting)", async () => {
+    const f = await rejoinFixture(), started = deferred<void>(), response = deferred<void>();
+    let peer: Promise<unknown> | undefined, refresh: Promise<unknown> | undefined, request: Promise<unknown> | undefined;
+    const refreshing = deferred<void>(), refreshed = deferred<void>();
+    try {
+      await f.memorySignup();
+      f.signinHook(async () => {started.resolve(); await response.promise;});
+      peer = f.b.invoke("auth.signin", {}); await started.promise;
+      await assert.rejects(f.a.invoke("notes.list", {}), locallyUnauthenticated);
+      response.resolve(); await peer;
+      f.refreshHook(async () => {refreshing.resolve(); await refreshed.promise;});
+      const client = new HttpTransport(origin, scoped("peer", {persist: {dir: f.dir}}));
+      refresh = client.invoke("auth.refresh", {refresh_token: f.first.refresh_token}); await refreshing.promise;
+      const snapshot = f.device.snapshot.bind(f.device), current = await snapshot();
+      /** A validated snapshot without I/O makes the send-versus-wait ordering deterministic. */
+      let first = true;
+      f.device.snapshot = async () => {if (first) {first = false; return current;} return snapshot();};
+      request = f.a.invoke("auth.request_password_reset", {email: "next@example.com"});
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(f.calls.reset, 0);
+      refreshed.resolve(); await refresh; await request;
+      const saved = await f.read();
+      assert.equal(f.calls.reset, 1); assert.equal(saved.authGeneration, current.bundle.authGeneration);
+      assert.equal(saved.session.refreshToken, f.rotated.refresh_token);
+    } finally {
+      response.resolve(); refreshed.resolve(); await peer?.catch(() => {});
+      await refresh?.catch(() => {}); await request?.catch(() => {}); await f.close();
+    }
+  });
+
+  for (const conflict of [false, true]) for (const operation of ["auth.signin", "auth.request_password_reset"]) test(
+    `STORE-REJOIN explicit authentication continues after peer refresh (${operation}, ${conflict ? "CAS retry" : "cleanup reread"})`, async () => {
+    const f = await rejoinFixture(), refreshing = deferred<void>(), refreshed = deferred<void>();
+    const started = deferred<void>(), response = deferred<void>();
+    let refresh: Promise<unknown> | undefined, request: Promise<unknown> | undefined;
+    try {
+      await f.memorySignup();
+      f.refreshHook(async () => {refreshing.resolve(); await refreshed.promise;});
+      const client = new HttpTransport(origin, scoped("peer", {persist: {dir: f.dir}}));
+      refresh = client.invoke("auth.refresh", {refresh_token: f.first.refresh_token}); await refreshing.promise;
+      await f.device.snapshot();
+      assert.equal(Reflect.get(f.device, "memory"), undefined);
+      const before = await f.read(), store: Store = await f.device.storage();
+      assert.ok(before.refresh);
+      let raced = false, conflicts = 0;
+      Reflect.set(f.device, "store", Promise.resolve({async read() {
+        const raw = await store.read();
+        if (!conflict && !raced) {
+          raced = true; assert.equal(JSON.parse(raw!).refresh, before.refresh);
+          refreshed.resolve(); await refresh;
+        }
+        return raw;
+      }, async swap(expected, raw, reset) {
+        if (conflict && !raced) {
+          raced = true; assert.equal(JSON.parse(expected!).refresh, before.refresh);
+          assert.equal(JSON.parse(raw).authGeneration, String(BigInt(before.authGeneration) + 1n));
+          refreshed.resolve(); await refresh;
+          const swapped = await store.swap(expected, raw, reset);
+          assert.equal(swapped, false); conflicts++; return swapped;
+        }
+        return store.swap(expected, raw, reset);
+      }} satisfies Store));
+      Object.assign(f.first, f.rotated);
+      const hold = async () => {started.resolve(); await response.promise;};
+      if (operation === "auth.signin") f.signinHook(hold); else f.resetHook(hold);
+      const calls = {...f.calls};
+      request = f.a.invoke(operation, {email: "next@example.com"});
+      await Promise.race([started.promise, request]);
+      const saved = await f.read();
+      assert.ok(raced); assert.equal(conflicts, conflict ? 1 : 0);
+      assert.equal(saved.authGeneration, before.authGeneration);
+      assert.equal(saved.refresh, undefined);
+      assert.deepEqual(saved.session, {accessToken: f.rotated.access_token, refreshToken: f.rotated.refresh_token,
+        userId: f.rotated.user_id, sessionId: f.rotated.session_id, expiresAt: f.rotated.expires_at,
+        refreshExpiresAt: f.rotated.refresh_expires_at});
+      assert.equal(operation === "auth.signin" ? f.calls.signin - calls.signin : f.calls.reset - calls.reset, 1);
+      response.resolve(); await request;
+      await f.a.invoke("notes.list", {});
+      assert.equal(f.access(), "Bearer " + f.rotated.access_token);
+      assert.equal((await f.read()).authGeneration, before.authGeneration);
+      assert.equal(f.calls.refresh, 1);
+    } finally {
+      refreshed.resolve(); response.resolve(); await refresh?.catch(() => {});
+      await request?.catch(() => {}); await f.close();
+    }
+  });
+
+  for (const applied of [false, true]) test("review5 public: cleanup recovery preserves refresh complete" +
+    (applied ? " (post-commit failure)" : ""), async () => {
+    const f = await rejoinFixture();
+    try {
+      await f.memorySignup(applied);
+      if (!applied) await f.peer(value => {value.pending = [];});
+      const before = await f.read();
+      await f.b.invoke("auth.refresh", {refresh_token: f.first.refresh_token});
+      assert.ok((await f.read()).authGeneration === before.authGeneration);
+      await f.a.invoke("notes.list", {});
+      assert.ok(f.access() === "Bearer " + f.rotated.access_token);
+      await f.a.invoke("auth.signup", {email: "next@example.com"});
+      assert.ok((await f.read()).session.refreshToken === f.rotated.refresh_token);
+      assert.ok(f.calls.refresh === 1 && f.calls.signup === 2);
+      assert.ok(Reflect.get(f.device, "memory") === undefined);
+    } finally {await f.close();}
+  });
+
+  test("review5: recovery must preserve another object refresh claim", async () => {
+    const f = await rejoinFixture(), started = deferred<void>(), response = deferred<void>();
+    let refresh: Promise<unknown> | undefined;
+    try {
+      await f.memorySignup();
+      f.refreshHook(async () => {started.resolve(); await response.promise;});
+      refresh = f.b.invoke("auth.refresh", {refresh_token: f.first.refresh_token}); await started.promise;
+      const marker = (await f.read()).refresh;
+      await assert.rejects(f.a.invoke("notes.list", {}), locallyUnauthenticated);
+      assert.ok((await f.read()).refresh === marker && f.calls.refresh === 1 && f.calls.protected === 0);
+      response.resolve(); await refresh;
+    } finally {response.resolve(); await refresh?.catch(() => {}); await f.close();}
+  });
+
+  for (const failedRead of [false, true]) test("review5: recovery must preserve another object unknown auth mark" +
+    (failedRead ? " (recovery reread failure)" : ""), async () => {
+    const f = await rejoinFixture();
+    try {
+      await f.memorySignup();
+      f.signinHook(async () => {throw new ClientError("unavailable", undefined, true);});
+      await assert.rejects(f.b.invoke("auth.signin", {}));
+      const pending = (await f.read()).pending;
+      assert.ok(pending.length === 1);
+      if (failedRead) f.failReadAfter(1);
+      await assert.rejects(f.a.invoke("notes.list", {}), locallyUnauthenticated);
+      assert.deepEqual((await f.read()).pending, pending);
+      assert.ok(f.calls.protected === 0);
+    } finally {await f.close();}
+  });
+
+  test("STORE-REJOIN own refresh with peer attempt cleanup", async () => {
+    const f = await rejoinFixture();
+    try {
+      await f.a.invoke("auth.signup", {email: "removed@example.com"});
+      f.fail(value => value.session?.refreshToken === f.rotated.refresh_token);
+      await f.a.invoke("auth.refresh", {refresh_token: f.first.refresh_token});
+      await f.b.invoke("auth.signup", {email: "peer@example.com"});
+      /** Peer cleanup is prepared at the real commit boundary; server consumption is not exercised. */
+      await f.peer(value => {
+        value.attempts = value.attempts.filter((item: any) => item.email !== "removed@example.com");
+        value.session = Object.fromEntries(Object.entries(value.session).reverse());
+      });
+      await f.a.invoke("notes.list", {});
+      const saved = await f.read();
+      assert.ok(saved.session.refreshToken === f.rotated.refresh_token && saved.refresh === undefined);
+      assert.deepEqual(saved.attempts.map((item: any) => item.email), ["peer@example.com"]);
+      assert.ok(f.calls.refresh === 1 && Reflect.get(f.device, "memory") === undefined);
+    } finally {await f.close();}
+  });
+
+  test("STORE-REJOIN own verification preserves consumed email scope", async () => {
+    const f = await rejoinFixture();
+    try {
+      await f.a.invoke("auth.signup", {email: "consumed@example.com"});
+      f.fail(value => value.session?.sessionId === f.verified.session_id);
+      await f.a.invoke("auth.verify_email", {attempt: f.attempts.get("consumed@example.com"), code: "123456"});
+      assert.ok(Reflect.get(f.device, "memory"));
+      await f.b.invoke("auth.signup", {email: "consumed@example.com"});
+      await f.b.invoke("auth.signup", {email: "other@example.com"});
+      await f.a.invoke("notes.list", {});
+      const saved = await f.read();
+      assert.ok(saved.session.sessionId === f.verified.session_id && f.access() === "Bearer " + f.verified.access_token);
+      assert.deepEqual(saved.attempts.map((item: any) => item.email), ["other@example.com"]);
+      assert.ok(Reflect.get(f.device, "memory") === undefined && f.calls.verify === 1);
+    } finally {await f.close();}
+  });
+
+  test("STORE-REJOIN own refresh with peer pending", async () => {
+    const f = await rejoinFixture(), started = deferred<void>(), response = deferred<void>();
+    let signup: Promise<unknown> | undefined;
+    try {
+      f.fail(value => value.session?.refreshToken === f.rotated.refresh_token);
+      await f.a.invoke("auth.refresh", {refresh_token: f.first.refresh_token});
+      f.signupHook(async () => {started.resolve(); await response.promise;});
+      signup = f.b.invoke("auth.signup", {email: "peer@example.com"}); await started.promise;
+      const marker = (await f.read()).pending[0];
+      await assert.rejects(f.a.invoke("notes.list", {}), locallyUnauthenticated);
+      const saved = await f.read();
+      assert.ok(saved.session.refreshToken === f.rotated.refresh_token && saved.refresh === undefined);
+      assert.deepEqual(saved.pending, [marker]);
+      response.resolve(); await signup;
+      await f.a.invoke("notes.list", {});
+      assert.ok(f.access() === "Bearer " + f.rotated.access_token && f.calls.refresh === 1);
+    } finally {response.resolve(); await signup?.catch(() => {}); await f.close();}
+  });
+
+  test("STORE-REJOIN own refresh with peer pending (auth generation changes)", async () => {
+    const f = await rejoinFixture(), started = deferred<void>(), response = deferred<void>();
+    let signin: Promise<unknown> | undefined;
+    try {
+      f.fail(value => value.session?.refreshToken === f.rotated.refresh_token);
+      await f.a.invoke("auth.refresh", {refresh_token: f.first.refresh_token});
+      f.first.session_id = randomUUID();
+      f.signinHook(async () => {started.resolve(); await response.promise;});
+      signin = f.b.invoke("auth.signin", {}); await started.promise;
+      assert.ok((await f.read()).pending.length === 1);
+      response.resolve(); await signin;
+      const raw = await f.store.read();
+      await assert.rejects(f.a.invoke("notes.list", {}), locallyUnauthenticated);
+      assert.ok(await f.store.read() === raw && f.calls.protected === 0);
+      assert.ok(Reflect.get(f.device, "memory") === undefined);
+      await f.a.invoke("notes.list", {});
+      assert.ok(f.calls.protected === 1 && f.calls.refresh === 1);
+    } finally {response.resolve(); await signin?.catch(() => {}); await f.close();}
+  });
+
+  test("STORE-REJOIN E1 login preserves access after unrelated peer write", async () => {
+    const f = await rejoinFixture();
+    try {
+      await f.a.invoke("auth.logout", {});
+      f.first.session_id = randomUUID();
+      f.fail(value => value.session?.sessionId === f.first.session_id);
+      await f.a.invoke("auth.signin", {});
+      assert.ok(Reflect.get(f.device, "memory"));
+      await f.b.invoke("auth.signup", {email: "peer@example.com"});
+      await f.a.invoke("notes.list", {});
+      const saved = await f.read();
+      assert.ok(!saved.blocked && saved.session.sessionId === f.first.session_id);
+      assert.deepEqual(saved.attempts.map((item: any) => item.email), ["peer@example.com"]);
+      assert.ok(f.access() === "Bearer " + f.first.access_token && Reflect.get(f.device, "memory") === undefined);
+      assert.ok(f.calls.signin === 2 && f.calls.refresh === 0);
+    } finally {await f.close();}
+  });
+
+  test("STORE-REJOIN preserves an unowned blocked boolean", async () => {
+    const f = await rejoinFixture();
+    try {
+      await f.memorySignup(); await f.peer(value => {value.blocked = true;});
+      await assert.rejects(f.a.invoke("notes.list", {}), locallyUnauthenticated);
+      assert.ok((await f.read()).blocked && f.calls.protected === 0);
+    } finally {await f.close();}
+  });
+
+  test("STORE-REJOIN merge bounds and CAS conflict (byte bound)", async () => {
+    const f = await rejoinFixture();
+    try {
+      await f.memorySignup(false);
+      await f.peer(value => {
+        value.pending = [];
+        for (let index = 0; ; index++) {
+          const key = ("filler-" + index).padEnd(64, "x"); value.selections[key] = "0";
+          if (new TextEncoder().encode(JSON.stringify(value)).length > 8180) {delete value.selections[key]; break;}
+        }
+      });
+      const before = await f.store.read();
+      assert.ok(new TextEncoder().encode(before!).length <= 8192);
+      const memory = Reflect.get(f.device, "memory"), persisted = JSON.parse(before!);
+      assert.ok(new TextEncoder().encode(JSON.stringify(memory)).length <= 8192);
+      assert.ok(new TextEncoder().encode(JSON.stringify({...persisted, attempts: [...persisted.attempts, ...memory.attempts]})).length > 8192);
+      await f.a.invoke("auth.bot_config", {});
+      assert.ok(await f.store.read() === before && Reflect.get(f.device, "memory"));
+      await f.peer(value => {value.selections = {};});
+      await f.a.invoke("auth.bot_config", {});
+      assert.ok((await f.read()).attempts.some((item: any) => item.email === "memory@example.com"));
+      assert.ok(Reflect.get(f.device, "memory") === undefined);
+    } finally {await f.close();}
+  });
+
+  test("STORE-REJOIN peer rotation is not proof of an own commit", async () => {
+    const f = await rejoinFixture();
+    try {
+      await f.memorySignup(false); await f.peer(value => {value.pending = [];});
+      await f.b.invoke("auth.refresh", {refresh_token: f.first.refresh_token});
+      f.fail(value => value.session?.refreshToken === f.rotated.refresh_token);
+      await f.a.invoke("auth.bot_config", {});
+      assert.ok(Reflect.get(f.device, "memory") && (await f.read()).attempts.length === 0);
+      await f.a.invoke("auth.bot_config", {});
+      assert.ok((await f.read()).attempts.some((item: any) => item.email === "memory@example.com"));
+      assert.ok(Reflect.get(f.device, "memory") === undefined && f.calls.refresh === 1 && f.calls.signup === 1);
+    } finally {await f.close();}
+  });
+
+  for (const peerChange of [false, true]) test("STORE-REJOIN uncertain commit already applied" +
+    (peerChange ? " with peer attempts" : ""), async () => {
+    const f = await rejoinFixture();
+    try {
+      f.fail(value => value.authGeneration === "2", true);
+      /** A new session identity uses the existing sign-in transition. */
+      f.first.session_id = randomUUID();
+      await f.a.invoke("auth.signin", {});
+      assert.ok(Reflect.get(f.device, "memory"));
+      if (peerChange) await f.b.invoke("auth.signup", {email: "peer@example.com"});
+      await f.a.invoke("notes.list", {});
+      assert.ok(f.access() === "Bearer " + f.first.access_token);
+      assert.ok((await f.read()).attempts.length === (peerChange ? 1 : 0));
+      assert.ok(Reflect.get(f.device, "memory") === undefined && f.calls.signin === 2);
+    } finally {await f.close();}
+  });
+
+  test("STORE-REJOIN uncertain commit then refresh with new session during read outage", async () => {
+    const f = await rejoinFixture(), refreshing = deferred<void>(), refreshed = deferred<void>();
+    const signingIn = deferred<void>(), signedIn = deferred<void>();
+    let refresh: Promise<unknown> | undefined, signin: Promise<unknown> | undefined;
+    try {
+      await f.a.invoke("auth.signup", {email: "kept@example.com"});
+      f.refreshHook(async () => {refreshing.resolve(); await refreshed.promise;});
+      refresh = f.a.invoke("auth.refresh", {refresh_token: f.first.refresh_token}); await refreshing.promise;
+      const next = credential(); Object.assign(f.first, next);
+      f.signinHook(async () => {signingIn.resolve(); await signedIn.promise;});
+      signin = f.a.invoke("auth.signin", {email: "next@example.com"}); await signingIn.promise;
+      const before = await f.read();
+      assert.ok(before.refresh && before.pending.length === 1);
+      assert.notEqual(next.session_id, before.session.sessionId);
+      f.fail(value => value.session?.refreshToken === f.rotated.refresh_token, true);
+      refreshed.resolve(); await refresh;
+      const candidate = Reflect.get(f.device, "memoryGeneration").candidate;
+      assert.equal(candidate.bundle.authGeneration, before.authGeneration);
+      assert.equal(candidate.raw, await f.store.read());
+      assert.equal(candidate.bundle.session.refreshToken, f.rotated.refresh_token);
+      f.failReadAfter(0); signedIn.resolve(); await signin;
+      const memory = Reflect.get(f.device, "memory"), recovery = Reflect.get(f.device, "memoryGeneration");
+      const targetGeneration = String(BigInt(before.authGeneration) + 1n);
+      assert.equal(recovery.candidate.raw, candidate.raw);
+      assert.equal(recovery.candidate.bundle.authGeneration, before.authGeneration);
+      assert.equal(memory.authGeneration, targetGeneration);
+      assert.equal(memory.session.sessionId, next.session_id);
+      const calls = {...f.calls};
+      await f.a.invoke("notes.list", {});
+      const saved = await f.read();
+      assert.equal(f.access(), "Bearer " + next.access_token);
+      assert.deepEqual(saved.session, {accessToken: next.access_token, refreshToken: next.refresh_token,
+        userId: next.user_id, sessionId: next.session_id, expiresAt: next.expires_at,
+        refreshExpiresAt: next.refresh_expires_at});
+      assert.equal(saved.authGeneration, targetGeneration);
+      assert.deepEqual(saved.attempts, before.attempts); assert.deepEqual(saved.selections, before.selections);
+      assert.equal(Reflect.get(f.device, "memory"), undefined);
+      assert.equal(Reflect.get(f.device, "memoryGeneration"), undefined);
+      assert.equal(f.calls.refresh, calls.refresh); assert.equal(f.calls.signin, calls.signin);
+      assert.equal(calls.refresh, 1); assert.equal(calls.signin, 2);
+    } finally {
+      refreshed.resolve(); signedIn.resolve(); await refresh?.catch(() => {});
+      await signin?.catch(() => {}); await f.close();
+    }
+  });
+
+  test("STORE-REJOIN logout failure remains blocked", async () => {
+    const f = await rejoinFixture();
+    try {
+      f.fail(value => value.blocked);
+      await assert.rejects(f.a.invoke("auth.logout", {}), unavailable);
+      await f.memorySignup();
+      await f.a.invoke("auth.bot_config", {});
+      await assert.rejects(f.a.invoke("notes.list", {}), locallyUnauthenticated);
+      assert.ok(f.calls.protected === 0);
+    } finally {await f.close();}
+  });
+
+  for (const remove of [false, true]) test("recovery 6 unchanged auth preserves peer attempt additions and removals" +
+    (remove ? " (removal)" : " (addition)"), async () => {
+    const f = await rejoinFixture();
+    try {
+      await f.a.invoke("auth.signup", {email: "base@example.com"});
+      await f.memorySignup(false);
+      await f.peer(value => {value.pending = []; if (remove) value.attempts = [];});
+      await f.b.invoke("auth.signup", {email: "peer@example.com"});
+      await f.a.invoke("auth.bot_config", {});
+      const saved = await f.read(), expected = ["memory@example.com", "peer@example.com"];
+      if (!remove) expected.push("base@example.com");
+      assert.deepEqual(saved.attempts.map((item: any) => item.email).sort(), expected.sort());
+      assert.ok(Reflect.get(f.device, "memory") === undefined);
+      await new HttpTransport(origin, scoped("a", {persist: {dir: f.dir}})).invoke("auth.send_verification_email", {});
+      assert.ok(f.attempt() === f.attempts.get("memory@example.com"));
+    } finally {await f.close();}
+  });
+
+  test("recovery 7 changed auth does not resurrect consumed attempts", async () => {
+    const f = await rejoinFixture();
+    try {
+      await f.a.invoke("auth.signup", {email: "consumed@example.com"});
+      await f.memorySignup(false);
+      /** Completed same-email cleanup is prepared at the bridge commit boundary. */
+      f.fail(value => value.attempts.every((item: any) => item.email !== "consumed@example.com"));
+      await f.device.update(undefined, (value: any) => {
+        value.attempts = value.attempts.filter((item: any) => item.email !== "consumed@example.com"); return true;
+      }, true);
+      await f.peer(value => {value.pending = [];});
+      await f.b.invoke("auth.signup", {email: "peer@example.com"});
+      await f.b.invoke("auth.refresh", {refresh_token: f.first.refresh_token});
+      await f.a.invoke("notes.list", {});
+      const saved = await f.read();
+      assert.ok(saved.session.refreshToken === f.rotated.refresh_token);
+      assert.deepEqual(saved.attempts.map((item: any) => item.email).sort(), ["memory@example.com", "peer@example.com"]);
+    } finally {await f.close();}
+  });
+
+  for (const conflict of [false, true]) test("STORE-REJOIN merge bounds and CAS conflict" +
+    (conflict ? " (conflict)" : " (attempt bound)"), async () => {
+    const f = await rejoinFixture();
+    try {
+      await f.memorySignup(false); await f.peer(value => {value.pending = [];});
+      for (const email of (conflict ? ["peer@example.com"] : ["b@example.com", "c@example.com", "d@example.com"])) {
+        await f.b.invoke("auth.signup", {email});
+      }
+      const before = await f.store.read();
+      if (conflict) {
+        let conflicts = 0;
+        const wrapped = await f.device.storage();
+        Reflect.set(f.device, "store", Promise.resolve({read: () => wrapped.read(), async swap(expected, raw, reset) {
+          if (conflicts++ === 0) {await f.peer(value => {value.pending.push(randomUUID());}); return false;}
+          return wrapped.swap(expected, raw, reset);
+        }} satisfies Store));
+        await assert.rejects(f.a.invoke("notes.list", {}), locallyUnauthenticated);
+        assert.ok(conflicts === 2 && (await f.read()).pending.length === 1);
+        assert.ok((await f.read()).attempts.some((item: any) => item.email === "peer@example.com"));
+      } else {
+        await f.a.invoke("auth.bot_config", {});
+        assert.ok(await f.store.read() === before && Reflect.get(f.device, "memory"));
+        await f.peer(value => {value.attempts.pop();});
+        await f.a.invoke("auth.bot_config", {});
+        assert.ok((await f.read()).attempts.length === 3 && Reflect.get(f.device, "memory") === undefined);
+      }
+      assert.ok(f.calls.refresh === 0 && f.calls.signin === 1);
+    } finally {await f.close();}
+  });
+
   // Reuses the generated-auth browser harness's optional Playwright setup.
   test("restores device state in real browser pages and keeps tabs separate", {skip: !process.env.CHIK_PLAYWRIGHT_ROOT}, async context => {
     const engines = await import(process.env.CHIK_PLAYWRIGHT_ROOT + "/index.mjs");
@@ -905,6 +1507,42 @@ if (process.argv[2]) {
               assert.ok(await first.evaluate('!Object.values(localStorage).some(value=>/password|accessToken|refreshToken|cookie|code/i.test(value))'));
               await first.evaluate('window.client.invoke("auth.logout",{})');
               assert.ok(await first.evaluate('window.client.invoke("notes.list",{}).then(()=>false,error=>error.code==="unauthenticated")'));
+              /** STORE-REJOIN browser two writers: a peer commits after recovery reads its expected value. */
+              await first.evaluate(`(async () => {
+                window.create("rejoin-a"); await window.client.invoke("auth.bot_config", {});
+                const device = window.client.device, store = await device.storage();
+                const {ClientError} = await import("/transport.js"); let failed = false;
+                device.store = Promise.resolve({read: () => store.read(), async swap(expected, raw, reset) {
+                  const saved = await store.swap(expected, raw, reset);
+                  if (saved && !failed && JSON.parse(raw).attempts.length === 1) {
+                    failed = true; throw new ClientError("failed_precondition");
+                  }
+                  return saved;
+                }});
+                await window.client.invoke("auth.signup", {email: "memory@example.com"});
+                if (!device.memory) throw new Error("Expected memory recovery.");
+              })()`);
+              await second.evaluate('window.create("rejoin-b"); window.client.invoke("auth.signup",{email:"peer@example.com"})');
+              const hit = deferred<void>(), release = deferred<void>();
+              await first.exposeFunction("rejoinSwap", async () => {hit.resolve(); await release.promise;});
+              await first.evaluate(`(async () => {
+                const device = window.client.device, store = await device.storage(); let paused = false;
+                device.store = Promise.resolve({read: () => store.read(), async swap(expected, raw, reset) {
+                  if (!paused) {paused = true; await window.rejoinSwap();}
+                  return store.swap(expected, raw, reset);
+                }});
+              })()`);
+              const recovering = first.evaluate('window.client.invoke("auth.bot_config",{})');
+              try {
+                await Promise.race([hit.promise, recovering.then(() => {throw new Error("Recovery skipped conditional replacement.");})]);
+                await second.evaluate('window.create("rejoin-c"); window.client.invoke("auth.signup",{email:"concurrent@example.com"})');
+                release.resolve(); await recovering;
+                const emails = await first.evaluate('JSON.parse(Object.values(localStorage)[0]).attempts.map(value=>value.email).sort()');
+                assert.deepEqual(emails, ["concurrent@example.com", "memory@example.com", "peer@example.com"]);
+                assert.ok(await first.evaluate('window.client.device.memory === undefined'));
+                context.diagnostic("STORE-REJOIN browser two writers: " + name + ", " + (locks ? "Web Locks" : "sequential fallback CAS"));
+              } finally {release.resolve(); await recovering.catch(() => {});}
+              await first.evaluate('window.client.invoke("auth.logout",{})');
               const before = anonymousCalls;
               assert.ok(await first.evaluate('window.client.invoke("catalog.list_items",{}).then(value=>value.account==="anonymous")'));
               assert.ok(anonymousCalls === before + 1);
