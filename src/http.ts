@@ -38,7 +38,7 @@ function prepareDevice(transport: object, origin: string, configuration: ReturnT
 
 export type ClientErrorCode = "invalid_argument" | "failed_precondition" | "resource_exhausted" |
   "deadline_exceeded" | "canceled" | "unavailable" | "data_loss" | "unimplemented" |
-  "internal" | "unknown" | "unauthenticated";
+  "internal" | "unknown" | "unauthenticated" | "permission_denied";
 
 export class ClientError extends Error {
   constructor(readonly code: ClientErrorCode, readonly status?: number, readonly outcomeUnknown = false) {
