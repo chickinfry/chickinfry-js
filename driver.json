@@ -1,0 +1,124 @@
+{
+  "protocolVersion": 2,
+  "driverVersion": "typescript-realtime-v1",
+  "driverCommit": "44c290d2f45a8455390b883ff1f394808de40f3e",
+  "build": null,
+  "executable": "",
+  "run": {
+    "entry": "conformance/driver/main.mjs"
+  },
+  "files": [
+    {
+      "path": "conformance/driver/hooks.mjs",
+      "sha256": "b1e7eca762d50e62a571bf094c4e9e07ebfcd4c6e6c3aa0c66ab30d4aecc4f57"
+    },
+    {
+      "path": "conformance/driver/main.mjs",
+      "sha256": "9ccd73c952fb5438fe1562c40d44d225503241e9a900d486a8fb3e2901f4e74a"
+    },
+    {
+      "path": "package-lock.json",
+      "sha256": "61768fd254c4a944091f893ce838873a00f7f9bace35cfca1a2910de6418486c"
+    },
+    {
+      "path": "package.json",
+      "sha256": "4b28ce7923954837106a86b91ef17a0f8111e285d4638c4005a1407cdaa84f50"
+    },
+    {
+      "path": "src/auth/core/crypto.ts",
+      "sha256": "d922ad6164404e3de68418cf78e29c930ffdcccd3e9690cb3f51b6c30902e4c4"
+    },
+    {
+      "path": "src/auth/core/errors.ts",
+      "sha256": "90ab25bbce71f60a60fd545da22a10f3b4673547fb454acc89ed50a47597dfe6"
+    },
+    {
+      "path": "src/auth/core/flows.ts",
+      "sha256": "e7e1ca9e49d0ceffea11e65035625ff74d20cce609d1b8830d9fd593129f02db"
+    },
+    {
+      "path": "src/auth/core/rules.ts",
+      "sha256": "1ace090063c8a25ed2522c4864420f005b6cddafd800f9920a2809b952f56e86"
+    },
+    {
+      "path": "src/auth/core/store.ts",
+      "sha256": "e91c5def28d1e30f1d8ff37277eaecd74db556e701356f8f148d75e1d6c78e20"
+    },
+    {
+      "path": "src/auth/core/types.ts",
+      "sha256": "eeb3336c501d0eec24cd823bb146f0eed299fb77f2a4f7afaf9abd87fd8476b3"
+    },
+    {
+      "path": "src/auth/core/version.ts",
+      "sha256": "ec438b5200ea921bbd4edb00313271ff1b30264b81838a44c453d42f1fcebc12"
+    },
+    {
+      "path": "src/auth/crypto.ts",
+      "sha256": "acc132fc587b745d67b706e50ee18b0dbda9e9e30ed52288cffcfc10a037e502"
+    },
+    {
+      "path": "src/auth/index.ts",
+      "sha256": "6e9bd902ba04dea070e4bed88cb72f07f342645b6b9530b0188aaf877b10a168"
+    },
+    {
+      "path": "src/auth/policy.ts",
+      "sha256": "f21a1079c87addb8227e1387fae0db6e72663f0af670e59850600471c94d3c1e"
+    },
+    {
+      "path": "src/auth/private/database.ts",
+      "sha256": "aa562457ae05448c0d4f8e75b6d4c63ae07a492a83788eba4fabbed666ea0e66"
+    },
+    {
+      "path": "src/auth/router.ts",
+      "sha256": "1cbfeb6bc08540daed92fa60e7f2a0a0b81fa118e757e4cdd9dc72f50c827a8b"
+    },
+    {
+      "path": "src/auth/runtime.ts",
+      "sha256": "024b543e73eb0c636016a90dfb09736ee4432357bf3ad61dc8bdefd781fe8719"
+    },
+    {
+      "path": "src/auth/store.ts",
+      "sha256": "ff12943277a51cadeaa46dadf6adac1415d4606e72b77a46f6acc628da2b8169"
+    },
+    {
+      "path": "src/device-node.ts",
+      "sha256": "5564397e78be02a7330a185efb5889e50f9043e97395982f47291ca31f898079"
+    },
+    {
+      "path": "src/device.ts",
+      "sha256": "0319bcedeb5cee154e18fefcdfdf04e0a65beacadb29d3b21743747a4dc44fbf"
+    },
+    {
+      "path": "src/http.ts",
+      "sha256": "e2935d5368491befd712d7386b5a6cf25a325be0f96666778a697bf249be962b"
+    },
+    {
+      "path": "src/index.ts",
+      "sha256": "9c0eb8330f27a1d390e652e356156f36bfb29c16a5b065ecb33e50723d5e4f19"
+    },
+    {
+      "path": "src/logging.ts",
+      "sha256": "fb9c03960a997c4eb520d393fc1baecc6bd12e89d8c6547e724c21a39594f950"
+    },
+    {
+      "path": "src/orm.ts",
+      "sha256": "e70c69dfa763035495e02f6420bdd1b90c761209852a6318b51d16071b6b6f93"
+    },
+    {
+      "path": "src/postgres.ts",
+      "sha256": "0258b841865da172a27a16775bfd568ed763dd9837cac98f528c575a0c0abad9"
+    },
+    {
+      "path": "src/realtime/client.ts",
+      "sha256": "6aa9a867de8fe9bc3209d9e3a2e5288f6b0700cff8aace7aece59259db2b9dba"
+    },
+    {
+      "path": "src/realtime/package.json",
+      "sha256": "15b5eb2e569bbd53046e812c4796f327f0322a9108627660f7f3e02f0bd5a6da"
+    },
+    {
+      "path": "src/realtime/protocol.ts",
+      "sha256": "0650c803127427182f2f3676f7f3c7ee90e79d62f905c2d05439783e8e0548a3"
+    }
+  ]
+}
