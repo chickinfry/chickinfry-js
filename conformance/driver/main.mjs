@@ -1,7 +1,9 @@
 import {closeSync, readFileSync} from "node:fs";
+import {mkdtemp, realpath, rm} from "node:fs/promises";
+import {tmpdir} from "node:os";
 import {createInterface} from "node:readline";
 import {fileURLToPath} from "node:url";
-import {resolve} from "node:path";
+import {join, resolve} from "node:path";
 import {hookKey, install} from "./hooks.mjs";
 
 export const driverVersion = "typescript-realtime-v1";
@@ -13,6 +15,7 @@ export class RecoveryFailure extends Error {}
 
 export class Driver {
   clients = new Map();
+  stores = new Map();
   points = new Set();
   waiters = new Set();
   held = new Map();
@@ -28,9 +31,11 @@ export class Driver {
   httpRequests = 0;
   httpStatus = null;
 
-  constructor(sdk, runtime) {
+  constructor(sdk, runtime, sessionSDK, credentials = new Map()) {
     this.sdk = sdk;
     this.runtime = runtime;
+    this.sessionSDK = sessionSDK;
+    this.credentials = credentials;
     this.hook = {
       gap: () => { this.mark(++this.gaps === 1 ? "gap-received" : "gap-received-again"); },
       overflow: () => this.mark("overflow-received"),
@@ -139,6 +144,11 @@ export class Driver {
   }
 
   async command(command, args) {
+    if (command === "handshake" && args.requiredCapabilities?.includes("session.store") && this.sessionSDK) {
+      if (!args.protocolVersions?.includes(2)) throw new Error("protocol_mismatch");
+      return {protocolVersion: 2, driverVersion, capabilities: ["client.create", "client.call", "session.store"]};
+    }
+    if (args.caseId === "C-12" && this.sessionSDK) return this.sessionCommand(command, args);
     if (args.caseId !== undefined && args.caseId !== "RT-DX-01") throw new Error("unimplemented");
     switch (command) {
       case "handshake":
@@ -197,6 +207,61 @@ export class Driver {
     }
     return {accepted: true};
   }
+
+  async sessionCommand(command, args) {
+    const store = this.stores.get(args.storeRef);
+    switch (command) {
+      case "session.store.create": {
+        if (store || args.accessRef !== undefined || args.refreshRef !== undefined || args.recordRef !== undefined) throw new Error("invalid_args");
+        const origin = new URL(args.origin);
+        if (origin.protocol !== "http:" || origin.hostname !== "127.0.0.1" || origin.origin !== args.origin) throw new Error("invalid_args");
+        const dir = await mkdtemp(join(await realpath(tmpdir()), "chik-c12-"));
+        this.stores.set(args.storeRef, {dir, origin: origin.origin});
+        return {storeRef: args.storeRef, revision: 0};
+      }
+      case "client.create": {
+        if (!store || this.clients.has(args.clientRef) || store.origin !== args.origin) throw new Error("invalid_args");
+        const {createClient} = await this.sessionSDK();
+        const before = this.httpRequests;
+        const transport = new this.runtime.HttpTransport(store.origin, {persist: {dir: store.dir}, timeout: args.requestTimeoutMs});
+        this.clients.set(args.clientRef, {client: createClient(transport)});
+        return {clientRef: args.clientRef, constructorNetworkRequests: this.httpRequests - before};
+      }
+      case "client.call": {
+        const client = this.clients.get(args.clientRef)?.client;
+        if (!client) throw new Error("invalid_reference");
+        this.httpStatus = null;
+        const input = {...args.input};
+        for (const [field, ref] of Object.entries(args.inputRefs ?? {})) {
+          if (field !== "password" || !this.credentials.has(ref)) throw new Error("invalid_reference");
+          input[field] = this.credentials.get(ref);
+        }
+        let output;
+        switch (args.operation) {
+          case "auth.signin": {
+            const {sessionId} = await client.auth.signin(input);
+            output = {sessionId};
+            break;
+          }
+          case "auth.logout": output = await client.auth.logout(input); break;
+          case "probe.echo": output = await client.probe.echo({wireValue: input.wire_value}); break;
+          case "probe.list": output = await client.probe.list(input); break;
+          default: throw new Error("unimplemented");
+        }
+        return {output, credentialRefs: {}, httpStatus: this.httpStatus};
+      }
+      case "session.store.read": {
+        if (!store || args.includeTrace === true) throw new Error("invalid_args");
+        const {openStore} = await import("../../src/device-node.ts");
+        const disk = await openStore(["", "", store.origin], store.dir, store.dir);
+        const raw = await disk.read();
+        if (raw === null) return {present: false, revision: 0, accessRef: null, refreshRef: null};
+        const {session, revision} = JSON.parse(raw);
+        return {present: session !== undefined, revision: Number(revision), accessRef: null, refreshRef: null};
+      }
+      default: throw new Error("unimplemented");
+    }
+  }
 }
 
 export function observeSockets(driver) {
@@ -231,9 +296,11 @@ async function main() {
   // Credentials arrive only on fd 3; RT-DX-01 uses its anonymous fixture.
   const bootstrap = readFileSync(3, "utf8");
   closeSync(3);
+  const credentials = new Map();
   for (const line of bootstrap.split("\n").filter(Boolean)) {
     const record = JSON.parse(line);
     if (typeof record.ref !== "string" || typeof record.value !== "string") throw new Error("invalid_reference");
+    credentials.set(record.ref, record.value);
   }
   install(fileURLToPath(new URL("../../", import.meta.url)), {
     "chickinfry-client-plain": options.get("--plain-sdk"),
@@ -241,7 +308,7 @@ async function main() {
   });
   const sdk = await import("chickinfry-client-plain");
   const runtime = await import("@chickinfry/chickinfry");
-  const driver = new Driver(sdk, runtime);
+  const driver = new Driver(sdk, runtime, () => import("chickinfry-client-auth"), credentials);
   globalThis[hookKey] = driver.hook;
   observeSockets(driver);
   const seen = new Set();
@@ -259,6 +326,11 @@ async function main() {
     const work = driver.command(request.command, request.args).then(result => {
       process.stdout.write(JSON.stringify({id: request.id, result, error: null}) + "\n");
     }, error => {
+      if (request.args.caseId === "C-12" && (error instanceof runtime.ClientError || error instanceof runtime.OperationError)) {
+        const failure = {kind: "sdk", code: error.code, httpStatus: error.status ?? null, outcomeUnknown: error.outcomeUnknown ?? false, rawTransportDetails: false};
+        process.stdout.write(JSON.stringify({id: request.id, result: null, error: failure}) + "\n");
+        return;
+      }
       const unimplemented = error.message === "unimplemented";
       process.stdout.write(JSON.stringify({id: request.id, result: null, error: {kind: unimplemented ? "unimplemented" : "driver", code: unimplemented ? "unimplemented" : "driver_failed", httpStatus: null, outcomeUnknown: null}}) + "\n");
     });
@@ -267,6 +339,7 @@ async function main() {
   }
   await driver.subscription?.unsubscribe();
   await Promise.all(pending);
+  await Promise.all([...driver.stores.values()].map(store => rm(store.dir, {recursive: true, force: true})));
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

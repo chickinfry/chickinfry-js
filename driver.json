@@ -14,7 +14,7 @@
     },
     {
       "path": "conformance/driver/main.mjs",
-      "sha256": "9ccd73c952fb5438fe1562c40d44d225503241e9a900d486a8fb3e2901f4e74a"
+      "sha256": "c97cca1e1cc942616646bb50f8b3ba1cc411185ba5b4350e9fdc0a199d9138c9"
     },
     {
       "path": "package-lock.json",
@@ -90,7 +90,7 @@
     },
     {
       "path": "src/http.ts",
-      "sha256": "e2935d5368491befd712d7386b5a6cf25a325be0f96666778a697bf249be962b"
+      "sha256": "e03b0ad6d2a1dbcaa64553f2254967e6f063b2ebf2cee4bff7baefa7a822cf59"
     },
     {
       "path": "src/index.ts",

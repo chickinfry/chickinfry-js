@@ -3,9 +3,12 @@ import type {Device} from "./device.js";
 
 export interface Transport {
   invoke(operation: string, input: Readonly<Record<string, unknown>>): Promise<unknown>;
+  invokePublic?(operation: string, input: Readonly<Record<string, unknown>>): Promise<unknown>;
 }
 
 const sessionRefreshes = new WeakMap<object, Map<string, Promise<string>>>();
+// A successful cleanup does not resolve an unknown refresh result.
+const uncertainClears = new WeakMap<SessionStore, string>();
 
 export class OperationError extends Error {
   constructor(readonly code: string, readonly status: number) {
@@ -34,6 +37,10 @@ function prepareDevice(transport: object, origin: string, configuration: ReturnT
     if (!attached) return configuration;
     return createDevice(origin, options, browser, token, configuration);
   } catch {throw failure();}
+}
+
+function canInvokeWithoutSession(store: SessionStore, operation: string, publicOperation: boolean): boolean {
+  return !uncertainClears.has(store) && publicOperation && operation !== "auth.refresh";
 }
 
 export type ClientErrorCode = "invalid_argument" | "failed_precondition" | "resource_exhausted" |
@@ -78,26 +85,39 @@ export class HttpTransport implements Transport {
   }
 
   withSession(store: SessionStore): HttpTransport {
-    const credentials = sessionCredentials(store);
-    if (!validToken(credentials.accessToken) || !validToken(credentials.refreshToken)) {
-      throw new ClientError("unauthenticated");
-    }
-    const copy = this.withBearer(credentials.accessToken);
+    const credentials = attachedCredentials(store);
+    if (credentials) assertSession(credentials, credentials);
+    const copy = new HttpTransport(this.origin, {timeout:this.timeout});
     copy.refreshes = sessionRefreshes.get(store) ?? new Map();
     sessionRefreshes.set(store, copy.refreshes);
     copy.sessionStore = store;
     return copy;
   }
 
-  async invoke(operation: string, input: Readonly<Record<string, unknown>>): Promise<unknown> {
+  invoke(operation: string, input: Readonly<Record<string, unknown>>): Promise<unknown> {
+    return this.#invoke(operation, input, false);
+  }
+
+  invokePublic(operation: string, input: Readonly<Record<string, unknown>>): Promise<unknown> {
+    return this.#invoke(operation, input, true);
+  }
+
+  async #invoke(operation: string, input: Readonly<Record<string, unknown>>, publicOperation: boolean): Promise<unknown> {
     this.configuration = prepareDevice(this, this.origin, this.configuration, false, this.token);
     this.device = this.configuration.device;
-    if (this.device) return withResponseStatus(received => this.device!.invoke(operation, input,
+    if (this.device && !this.sessionStore) return withResponseStatus(received => this.device!.invoke(operation, input,
       (operation, input, token, _anonymous, responseStatus) => this.invokeOnce(operation, input, token, status => { received(status); responseStatus?.(status); }),
-      this.configuration.publicOperations?.includes(operation)));
+      publicOperation || this.configuration.publicOperations?.includes(operation)));
     const store = this.sessionStore;
     if (!store) return this.invokeOnce(operation, input, this.token);
-    let credentials = {...sessionCredentials(store)};
+    const current = attachedCredentials(store);
+    if (!current) {
+      if (canInvokeWithoutSession(store, operation, publicOperation)) {
+        return this.invokeOnce(operation, input, undefined);
+      }
+      throw new ClientError("unauthenticated");
+    }
+    let credentials = {...current};
     if (operation === "auth.refresh") {
       const refreshToken = input.refresh_token;
       try { return await this.invokeOnce(operation, input, undefined); }
@@ -111,6 +131,8 @@ export class HttpTransport implements Transport {
       credentials = {...sessionCredentials(store)};
       assertSession(expected, credentials);
     }
+    const uncertainRefreshToken = uncertainClears.get(store);
+    if (uncertainRefreshToken !== undefined && uncertainRefreshToken !== credentials.refreshToken) uncertainClears.delete(store);
     try {
       return await this.invokeOnce(operation, input, credentials.accessToken);
     } catch (error) {
@@ -174,7 +196,12 @@ export class HttpTransport implements Transport {
         void blocked.catch(() => {});
         this.refreshes.set(refreshToken, blocked);
       }
-      try { if (refreshToken === expected.refreshToken) await store.clear(expected); }
+      try {
+        if (typeof refreshToken === "string" && refreshToken === expected.refreshToken) {
+          uncertainClears.set(store, refreshToken);
+          await store.clear(expected);
+        }
+      }
       finally { throw failure; }
     }
     if (error.status === 401 && refreshToken === expected.refreshToken) {
@@ -201,6 +228,7 @@ export interface SessionCredentials {
 }
 
 export interface SessionStore {
+  /** Read the credentials, or throw an unauthenticated ClientError for an empty store. */
   credentials(): SessionCredentials;
   refresh(operation: (credentials: SessionCredentials) => Promise<SessionCredentials>): Promise<SessionCredentials>;
   clear(expected: SessionCredentials): Promise<void>;
@@ -239,6 +267,15 @@ function sessionCredentials(store: SessionStore): SessionCredentials {
   catch (error) { throw error instanceof ClientError ? error : new ClientError("failed_precondition"); }
 }
 
+function attachedCredentials(store: SessionStore): SessionCredentials | undefined {
+  try {
+    return {...sessionCredentials(store)};
+  } catch (error) {
+    if (error instanceof ClientError && error.code === "unauthenticated") return undefined;
+    throw error;
+  }
+}
+
 async function withResponseStatus<T>(work: (received: (status: number) => void) => Promise<T>): Promise<T> {
   let status: number | undefined;
   try { return await work(value => { status = value; }); }
@@ -261,8 +298,8 @@ function transportFailure(error: unknown, status?: number): ClientError {
   return new ClientError(code, status, true);
 }
 
-function validToken(value: string): boolean {
-  return /^[A-Za-z0-9_-]{43}$/.test(value);
+function validToken(value: unknown): boolean {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value);
 }
 
 function assertSession(expected: SessionCredentials, current: SessionCredentials): void {
@@ -302,12 +339,18 @@ export class BrowserHttpTransport implements Transport {
     this.configuration = createDevice(this.origin, options, true, Reflect.get(options, "token"));
     this.device = this.configuration.device;
   }
-  async invoke(operation: string, input: Readonly<Record<string, unknown>>): Promise<unknown> {
+  invoke(operation: string, input: Readonly<Record<string, unknown>>): Promise<unknown> {
+    return this.#invoke(operation, input, false);
+  }
+  invokePublic(operation: string, input: Readonly<Record<string, unknown>>): Promise<unknown> {
+    return this.#invoke(operation, input, true);
+  }
+  async #invoke(operation: string, input: Readonly<Record<string, unknown>>, publicOperation: boolean): Promise<unknown> {
     this.configuration = prepareDevice(this, this.origin, this.configuration, true);
     this.device = this.configuration.device;
     if (this.device) return withResponseStatus(received => this.device!.invoke(operation, input,
       (operation, input, _token, anonymous, responseStatus) => this.invokeOnce(operation, input, anonymous, status => { received(status); responseStatus?.(status); }),
-      this.configuration.publicOperations?.includes(operation)));
+      publicOperation || this.configuration.publicOperations?.includes(operation)));
     return this.invokeOnce(operation, input);
   }
   private invokeOnce(operation: string, input: Readonly<Record<string, unknown>>, anonymous = false, received?: (status: number) => void): Promise<unknown> {

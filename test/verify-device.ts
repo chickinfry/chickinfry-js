@@ -353,8 +353,10 @@ if (process.argv[2]) {
     };
     try {
       const client = new HttpTransport(origin, scoped("a", {persist: {dir}}));
-      Reflect.set(client, Symbol.for("chickinfry.store.public.v1"), ["catalog.list_items"]);
-      await client.invoke("auth.signin", {}); await client.invoke("auth.logout", {});
+      await client.invokePublic("auth.signin", {});
+      await client.invokePublic("catalog.list_items", {});
+      assert.deepEqual(anonymous, [false]);
+      await client.invoke("auth.logout", {});
       const before = calls;
       await assert.rejects(client.invoke("notes.list", {}), error => error instanceof ClientError && error.code === "unauthenticated" && error.status === undefined);
       assert.ok(calls === before);
@@ -363,6 +365,9 @@ if (process.argv[2]) {
         await assert.rejects(client.invoke("catalog.list_items", {}), error => error instanceof ClientError && error.code === "unauthenticated" && error.status === undefined);
         assert.ok(calls === before);
       }
+      const publicResult = await client.invokePublic("catalog.list_items", {}) as {account: string};
+      assert.equal(publicResult.account, "anonymous");
+      await assert.rejects(client.invoke("catalog.list_items", {}), error => error instanceof ClientError && error.code === "unauthenticated");
       Reflect.set(client, Symbol.for("chickinfry.store.public.v1"), ["catalog.list_items"]);
       const restored = new HttpTransport(origin, scoped("b", {persist: {dir}}));
       Reflect.set(restored, Symbol.for("chickinfry.store.public.v1"), ["catalog.list_items"]);
@@ -372,7 +377,8 @@ if (process.argv[2]) {
         const value = await current.invoke("catalog.list_items", {}) as {account: string};
         assert.ok(value.account === "anonymous");
       }
-      assert.ok(calls === before + 3 && anonymous.length === 3 && anonymous.every(Boolean));
+      assert.equal(calls, before + 4);
+      assert.deepEqual(anonymous, [false, true, true, true, true]);
     } finally {globalThis.fetch = originalFetch; await rm(dir, {recursive: true});}
   });
 

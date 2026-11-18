@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { HttpTransport, BrowserHttpTransport, ClientError, OperationError } from "../src/http.js";
+import { HttpTransport, BrowserHttpTransport, ClientError, MemoryStore, OperationError } from "../src/http.js";
 
 class CustomHTTP extends HttpTransport {
   refreshFailed(): void {}
@@ -50,7 +50,8 @@ globalThis.fetch = async (input, init) => {
 try {
   const transport = new HttpTransport("https://example.com").withSession(store);
   const secondTransport = new HttpTransport("https://example.com").withSession(store);
-  await Promise.all(Array.from({length:8},(_, index) => (index%2 ? secondTransport : transport).invoke("catalog.create",{})));
+  await Promise.all(Array.from({length:8},(_, index) => index%2
+    ? secondTransport.invokePublic("catalog.list",{}) : transport.invoke("catalog.create",{})));
   if (refreshes !== 1 || accessToken !== newAccessToken || refreshToken !== "d".repeat(43) || cleared) {
     throw new Error("Refresh state mismatch.");
   }
@@ -66,6 +67,73 @@ try {
   }
   assert.ok(cleared, "Failure state mismatch.");
   assert.equal(refreshes, 2);
+  const signedOut = (error: unknown) => error instanceof ClientError &&
+    error.code === "unauthenticated" && error.status === undefined && !error.outcomeUnknown;
+  const sessionA = {...store.credentials(), accessToken:oldAccessToken, refreshToken:"b".repeat(43)};
+  const sessionB = {...sessionA, accessToken:newAccessToken, refreshToken:"d".repeat(43), sessionId:"new-session"};
+  let backing = new MemoryStore(sessionA);
+  let readOverride: (() => Credentials) | undefined;
+  const attachedStore = {
+    credentials: () => readOverride ? readOverride() : backing.credentials(),
+    refresh: (work: (value: Credentials) => Promise<Credentials>) => backing.refresh(work),
+    clear: (expected: Credentials) => backing.clear(expected),
+  };
+  const attached = new HttpTransport("https://example.com").withSession(attachedStore);
+  const requests: [string, string | null][] = [];
+  globalThis.fetch = async (input, init) => {
+    const path = new URL(String(input)).pathname;
+    const authorization = new Headers(init?.headers).get("authorization");
+    requests.push([path, authorization]);
+    if (path === "/auth.signin") return Response.json({access_token:sessionB.accessToken, refresh_token:sessionB.refreshToken});
+    if (path === "/catalog.create" && authorization !== "Bearer " + sessionB.accessToken) {
+      return Response.json({error:"invalid_token"}, {status:401});
+    }
+    return Response.json({});
+  };
+  await attached.invoke("auth.logout", {});
+  await attachedStore.clear(sessionA);
+  await attached.invokePublic("auth.signup", {});
+  await attached.invokePublic("catalog.list", {});
+  await assert.rejects(attached.invoke("catalog.create", {}), signedOut);
+  await assert.rejects(attached.invoke("catalog.list", {}), signedOut);
+  const login = await attached.invokePublic("auth.signin", {}) as {access_token: string; refresh_token: string};
+  backing = new MemoryStore({...sessionB, accessToken:login.access_token, refreshToken:login.refresh_token});
+  await attached.invoke("catalog.create", {});
+  assert.deepEqual(requests, [
+    ["/auth.logout", "Bearer " + sessionA.accessToken],
+    ["/auth.signup", null],
+    ["/catalog.list", null],
+    ["/auth.signin", null],
+    ["/catalog.create", "Bearer " + sessionB.accessToken],
+  ]);
+
+  readOverride = () => { throw new Error("Storage unavailable."); };
+  const readFailed = (error: unknown) => error instanceof ClientError && error.code === "failed_precondition" && error.status === undefined;
+  await assert.rejects(attached.invokePublic("auth.signin", {}), readFailed);
+  assert.throws(() => new HttpTransport("https://example.com").withSession(attachedStore), readFailed);
+  readOverride = () => ({...sessionB, refreshToken:""});
+  await assert.rejects(attached.invokePublic("auth.signin", {}), signedOut);
+  assert.throws(() => new HttpTransport("https://example.com").withSession(attachedStore), signedOut);
+  readOverride = () => { throw new ClientError("unauthenticated"); };
+  const empty = new HttpTransport("https://example.com").withSession(attachedStore);
+  await empty.invokePublic("catalog.list", {});
+  await assert.rejects(empty.invokePublic("auth.refresh", {}), signedOut);
+  assert.equal(requests.length, 6);
+
+  const uncertainStore = new MemoryStore(sessionB);
+  const uncertain = new HttpTransport("https://example.com").withSession(uncertainStore);
+  globalThis.fetch = async input => {
+    const path = new URL(String(input)).pathname;
+    requests.push([path, null]);
+    if (path === "/auth.refresh") throw new DOMException("Timeout.", "TimeoutError");
+    return Response.json({error:"invalid_token"}, {status:401});
+  };
+  await assert.rejects(uncertain.invoke("catalog.create", {}), (error: ClientError) =>
+    error.code === "deadline_exceeded" && error.outcomeUnknown);
+  assert.throws(() => uncertainStore.credentials(), signedOut);
+  await assert.rejects(uncertain.invokePublic("auth.signin", {}), signedOut);
+  assert.equal(requests.length, 8);
+
   let calls = 0;
   globalThis.fetch = async (_input, init) => {
     calls++;
