@@ -4,7 +4,8 @@ import { sessionPolicy, sessionExpiry, sessionState, cookieMaxAge, accessLifetim
   emailPolicy, signupPolicy, emailSigninAllowed, mailRateKeys, actionTokenExpiry, type SessionPolicy } from "./rules.js";
 import { AuthError } from "./errors.js";
 import type { Store, AppAuthUsersRow, AppAuthInvitesRow, AppAuthSessionsRow, AppAuthRefreshTokensRow, AppAuthRateLimitsRow, AppAuthSignupRequestsRow } from "./store.js";
-import type { Tokens, BrowserSession, IdentityProvider, AuthUser, AuthOptions, SessionTransport, InviteSummary, AuthActor, ActionTokenKind } from "./types.js";
+import type { Tokens, BrowserSession, IdentityProvider, AuthUser, AuthOptions, SessionTransport, InviteSummary, AuthActor, ActionTokenKind,
+  SignupRateLimitOptions } from "./types.js";
 
 const day = 24 * 60 * 60_000;
 
@@ -13,7 +14,7 @@ export class Flows {
   readonly policy: Required<SessionPolicy>;
 
   constructor(private readonly db: Store, providers: readonly IdentityProvider[], private readonly now: () => number,
-    private readonly options: AuthOptions) {
+    private readonly options: AuthOptions, private readonly signupRateLimit: Required<SignupRateLimitOptions>) {
     if (options.signup !== undefined && options.signup !== "open" && options.signup !== "invite-only") {
       throw new Error("Invalid signup policy.");
     }
@@ -30,7 +31,7 @@ export class Flows {
     email = normalizeEmail(email);
     validatePassword(password);
     if (typeof inviteCode !== "string") throw new AuthError("invalid_input", 400);
-    await this.rateLimit("signup", email);
+    await this.rateLimitSignup(email);
     const invite = this.options.signup === "invite-only" ? await this.checkInvite(this.db, email, inviteCode) : undefined;
     const passwordHash = await hashPassword(password);
     const mailAllowed = this.options.email?.verification === "required" && await this.allowMail(email, callerIp);
@@ -253,7 +254,7 @@ export class Flows {
     await this.rateLimit("identity", providerID + ":" + identity.subject);
     if (this.options.signup === "invite-only" &&
         !await this.db.identity(providerID, identity.subject)) {
-      await this.rateLimit("signup", email);
+      await this.rateLimitSignup(email);
       await this.checkInvite(this.db, email, inviteCode);
     }
     return {providerID, identity, email};
@@ -473,6 +474,11 @@ export class Flows {
   }
 
   private timestamp(): string { return new Date(this.now()).toISOString(); }
+
+  private async rateLimitSignup(email: string): Promise<void> {
+    const {signal, max, windowSeconds} = this.signupRateLimit;
+    if (signal !== "off") await this.rateLimit("signup", signal === "email" ? email : "signup:global", max, windowSeconds * 1_000);
+  }
 
   private async rateLimit(action: string, value: string, maximum = 10, windowMillis = 15 * 60_000): Promise<void> {
     const key = {action, keyHash: hashToken(value)};

@@ -6,6 +6,24 @@ import * as rules from "../dist/auth/core/rules.js";
 
 const noIO = {query() { throw new Error("Unexpected I/O"); }, transaction() { throw new Error("Unexpected I/O"); }};
 
+test("signup rate limit rejects invalid declaration and environment values before I/O", () => {
+  const invalid = (options, field) => assert.throws(() => new Auth(noIO, [], Date.now, {}, options), error => {
+    assert.ok(error.message.includes(field));
+    assert.ok(!error.message.includes("fixture-invalid"));
+    return true;
+  });
+  invalid({signupRateLimit: {signal: "fixture-invalid"}}, "auth.rate_limits.signup.signal");
+  invalid({signupRateLimit: {max: 0}}, "auth.rate_limits.signup.max");
+  invalid({signupRateLimit: {windowSeconds: null}}, "auth.rate_limits.signup.window_seconds");
+  invalid({signupRateLimit: {windowSeconds: 1.5}}, "auth.rate_limits.signup.window_seconds");
+  invalid({signupRateLimit: {max: 2 ** 31}}, "auth.rate_limits.signup.max");
+  const name = "AUTH_RATE_LIMITS_SIGNUP_MAX";
+  for (const value of ["", "0", " 2", "2\n", "1e2", "fixture-invalid"]) {
+    invalid({lookupEnv: key => key === name ? value : undefined}, name);
+  }
+  invalid({lookupEnv: () => { throw new Error("fixture-invalid"); }}, "AUTH_RATE_LIMITS_SIGNUP_SIGNAL");
+});
+
 test("verified email requires an injected mailer and a safe client link base at startup", () => {
   assert.throws(() => new Auth(noIO, [], Date.now, {}, {email: {verification: "required"}}), /mailer/i);
   const mailer = {async send() {}};
@@ -658,6 +676,42 @@ test("two-step email authentication preserves privacy and atomic state on Postgr
       clock += 15 * 60_000;
       await signup(address);
     }
+  });
+
+  await t.test("signup uses declared limits and applies environment overrides per field", async () => {
+    const request = new Request("https://api.example.test/auth.signup", {method: "POST"});
+    const signupRateLimit = {signal: "email", max: 1, windowSeconds: 2};
+    const call = (runtime, address, operation = "auth.signup") =>
+      invokeAuth(runtime, operation, {email: address, password}, request);
+    const declared = new Auth(port, [], now, {}, {signupRateLimit});
+    const first = fresh();
+    assert.ok((await call(declared, first)).access_token);
+    await rejected(call(declared, first), "rate_limited", 429);
+    assert.ok((await call(declared, fresh())).access_token);
+    clock += 2_000;
+    await rejected(call(declared, first), "account_exists", 409);
+
+    const environment = {
+      AUTH_RATE_LIMITS_SIGNUP_SIGNAL: "global",
+      AUTH_RATE_LIMITS_SIGNUP_MAX: "2",
+      AUTH_RATE_LIMITS_SIGNUP_WINDOW_SECONDS: "3",
+    };
+    const overridden = new Auth(port, [], now, {}, {signupRateLimit, lookupEnv: name => environment[name]});
+    const second = fresh();
+    assert.ok((await call(overridden, second)).access_token);
+    assert.ok((await call(overridden, fresh())).access_token);
+    await rejected(call(overridden, fresh()), "rate_limited", 429);
+    assert.ok((await call(overridden, second, "auth.signin")).access_token);
+    clock += 2_000;
+    await rejected(call(overridden, fresh()), "rate_limited", 429);
+    clock += 1_000;
+    assert.ok((await call(overridden, fresh())).access_token);
+    const disabled = new Auth(port, [], now, {}, {
+      signupRateLimit: {signal: "off", max: 1}, lookupEnv: name => name === "AUTH_RATE_LIMITS_SIGNUP_SIGNAL" ? "off" : undefined,
+    });
+    const unthrottled = fresh();
+    assert.ok((await call(disabled, unthrottled)).access_token);
+    await rejected(call(disabled, unthrottled), "account_exists", 409);
   });
 
   await t.test("mail without a trusted caller IP keeps independent addresses and the address budget", async () => {

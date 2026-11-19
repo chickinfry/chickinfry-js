@@ -38,8 +38,16 @@ export interface AuthActor {
   readonly user: { readonly id: string; readonly email: string };
 }
 
+export interface SignupRateLimitOptions {
+  readonly signal?: "email" | "global" | "off";
+  readonly max?: number;
+  readonly windowSeconds?: number;
+}
+
 export interface AuthOptions {
   readonly signup?: "open" | "invite-only";
+  readonly signupRateLimit?: SignupRateLimitOptions;
+  readonly lookupEnv?: (name: string) => string | undefined;
   readonly projectId?: string;
   readonly session?: SessionPolicy;
   readonly email?: { readonly verification: "required" | "off" };

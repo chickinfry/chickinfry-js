@@ -6,11 +6,12 @@ import { Flows } from "./core/flows.js";
 import { AuthError } from "./core/errors.js";
 import { normalizeEmail, validateToken, cleanupCandidates, cleanupPage, emailPolicy, signupPolicy, emailLinkBase, renderAuthMail, type SessionPolicy } from "./core/rules.js";
 import { coreVersion } from "./core/version.js";
-import type { Tokens, BrowserSession, IdentityProvider, AuthUser, AuthActor, AuthOptions, SessionTransport, InviteSummary,
+import { resolveSignupRateLimit } from "./signup-rate-limit.js";
+import type { Tokens, BrowserSession, IdentityProvider, AuthUser, AuthActor, AuthOptions, SignupRateLimitOptions, SessionTransport, InviteSummary,
   AuthMailer, AuthMail, ActionTokenKind, Accepted, SignupAttempt, SignupHookResult } from "./core/types.js";
 
 export { AuthError, normalizeEmail };
-export type { SessionPolicy, Tokens, BrowserSession, IdentityProvider, AuthUser, AuthActor, AuthOptions, SessionTransport, InviteSummary,
+export type { SessionPolicy, Tokens, BrowserSession, IdentityProvider, AuthUser, AuthActor, AuthOptions, SignupRateLimitOptions, SessionTransport, InviteSummary,
   AuthMailer, AuthMail, ActionTokenKind, Accepted, SignupAttempt, SignupHookResult };
 
 export interface UserCreationHooks {
@@ -57,8 +58,10 @@ export class Auth {
       !options.projectName.trim() || options.projectName.length > 200 || /[\r\n\0]/.test(options.projectName))) {
       throw new Error("Auth project name must be a nonempty single line.");
     }
+    const lookupEnv = options.lookupEnv ?? (name => typeof process === "undefined" ? undefined : process.env[name]);
+    const signupRateLimit = resolveSignupRateLimit(options.signupRateLimit, lookupEnv);
     this.db = createStore(port);
-    this.flows = new Flows(this.db, providers, () => this.now(), options);
+    this.flows = new Flows(this.db, providers, () => this.now(), options, signupRateLimit);
     this.policy = this.flows.policy;
   }
 

@@ -156,6 +156,27 @@ instead of silently reset. Storage failures use `ClientError` without an HTTP st
 and `failed_precondition`, `data_loss`, `resource_exhausted`,
 or `unimplemented`.
 
+### Signup rate limit
+
+Pass the normalized `auth.rate_limits.signup` settings as `AuthOptions.signupRateLimit`
+when constructing `Auth`. The runtime accepts the following per-field overrides.
+
+| Option | Environment variable | Default |
+| --- | --- | --- |
+| `signal` | `AUTH_RATE_LIMITS_SIGNUP_SIGNAL` | `email` |
+| `max` | `AUTH_RATE_LIMITS_SIGNUP_MAX` | 10 |
+| `windowSeconds` | `AUTH_RATE_LIMITS_SIGNUP_WINDOW_SECONDS` | 900 |
+
+`email` limits each normalized email address independently. `global` shares a
+signup limit across the authentication database. Map `auth.rate_limits.signup: off`
+to `signal: "off"` to disable the signup limit. Environment variables override
+individual options. Hosts that expose deployment variables separately from
+`process.env` must supply `AuthOptions.lookupEnv`. A failed lookup must throw
+so the runtime rejects the configuration. Set the count and window to positive integers (up to
+2,147,483,647 attempts and 31,536,000 seconds). Environment integers use decimal
+digits without padding. Invalid settings fail before database I/O. A full signup
+bucket returns `rate_limited` (429). Existing buckets retain their expiry.
+
 ### Email verification and password reset
 
 Email behavior is opt-in at the runtime boundary. With no email options, signup still issues a session immediately, duplicate addresses return `account_exists` (409), and no mail is sent. A generator can enable verification explicitly with `email: {verification: "required"}`; the runtime requires an injected `AuthMailer` and an HTTPS `emailLinkBase` (HTTP loopback is allowed for development). Apply the generated email authentication migration before enabling these options.
