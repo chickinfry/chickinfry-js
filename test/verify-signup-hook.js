@@ -17,7 +17,8 @@ function fixture(t, creating, query = async () => []) {
   const port = {
     async query(sql, parameters) {
       calls.push({sql, parameters});
-      if (sql.startsWith("select current_setting")) return [{lock_timeout: "7s", statement_timeout: "9s"}];
+      if (sql.includes(" as transaction_state")) return [{transaction_state: "stable"}];
+      if (sql.startsWith("select pg_catalog.current_setting")) return [{lock_timeout: "7s", statement_timeout: "9s"}];
       return query(sql, parameters);
     },
     transaction() { throw new Error("Unexpected transaction."); },
@@ -65,8 +66,9 @@ test("successful signup hook restores existing limits and closes its handle", as
   });
   await run();
   assert.ok(calls.some(call => call.sql.includes("'1000ms'")));
-  assert.deepEqual(calls.at(-1), {
-    sql: "select set_config('lock_timeout', $1, true), set_config('statement_timeout', $2, true)", parameters: ["7s", "9s"],
+  assert.ok(calls.at(-1).sql.includes(" as transaction_state"));
+  assert.deepEqual(calls.at(-2), {
+    sql: "select pg_catalog.set_config('lock_timeout', $1, true), pg_catalog.set_config('statement_timeout', $2, true)", parameters: ["7s", "9s"],
   });
   await expired(lease.query("late", []));
   assert.deepEqual(logs, []);

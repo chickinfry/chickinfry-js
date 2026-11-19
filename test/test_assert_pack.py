@@ -95,6 +95,7 @@ class PackAssertionTest(unittest.TestCase):
     def test_allowed_exports(self):
         for exports in ({}, {
             ".": "./dist/index.js", "./auth": "./dist/auth/index.js",
+            "./auth/runtime": "./dist/auth/host.js",
             "./postgres": "./dist/postgres.js", "./logging": "./dist/logging.js",
         }):
             with self.subTest(exports=exports):

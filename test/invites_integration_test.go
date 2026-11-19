@@ -3,6 +3,7 @@ package invitations_test
 import (
 	"context"
 	"encoding/hex"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -110,9 +111,20 @@ func TestInvitationsWithPostgreSQL(t *testing.T) {
 	if err := migration.Compare(actual, module.Manifest); err != nil {
 		t.Fatal(err)
 	}
+	if err := conn.Close(t.Context()); err != nil {
+		t.Fatal("cannot close the authentication module setup connection")
+	}
+	// Bounded cleanup must not compete with expired sessions from earlier suites.
+	run("docker", "exec", "-u", "postgres", container, "psql", "-U", "chik", "-d", "postgres",
+		"-v", "ON_ERROR_STOP=1", "-c", "CREATE DATABASE chik_runtime TEMPLATE chik")
+	runtimeURL, err := url.Parse(connection)
+	if err != nil {
+		t.Fatal("cannot parse the disposable authentication database address")
+	}
+	runtimeURL.Path = "/chik_runtime"
 	for _, script := range []string{
 		"verify-sessions.js", "verify-invites.js", "verify-postgres.js", "verify-signup-hook.js",
-		"verify-auth-email.js",
+		"verify-auth-email.js", "verify-auth-runtime.js",
 	} {
 		t.Run(script, func(t *testing.T) {
 			command := exec.CommandContext(
@@ -125,6 +137,7 @@ func TestInvitationsWithPostgreSQL(t *testing.T) {
 			command.Dir = root
 			command.Env = append(os.Environ(),
 				"CHIK_TEST_DATABASE_URL="+connection,
+				"CHIK_TEST_RUNTIME_DATABASE_URL="+runtimeURL.String(),
 				"CHIK_TEST_DATABASE_CA="+cert,
 				"CHIK_TEST_DATABASE_KEY="+key,
 				"CHIK_REQUIRE_URL_CORPUS=1",

@@ -50,7 +50,7 @@ def assert_pack(directory):
                     raise ValueError("Unexpected npm publish configuration.")
                 exports = manifest.get("exports")
                 if (not isinstance(exports, dict)
-                        or not exports.keys() <= {".", "./auth", "./postgres", "./logging"}
+                        or not exports.keys() <= {".", "./auth", "./auth/runtime", "./postgres", "./logging"}
                         or any(not isinstance(target, str) or not target.startswith("./dist/")
                                or not target.endswith(".js") or "\\" in target
                                or is_realtime(target)

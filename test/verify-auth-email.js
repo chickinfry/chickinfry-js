@@ -125,6 +125,12 @@ test("two-step email authentication preserves privacy and atomic state on Postgr
     async committed() { hooks.push("committed"); },
   }, settings);
   const fresh = () => randomUUID() + "@example.test";
+  const seedMissingResetRequests = async (runtime, callerIp) => {
+    // Overlap the response padding for independent addresses while keeping every budget charge.
+    for (let batch = 0; batch < 6; batch++) {
+      await Promise.all(Array.from({length: 5}, () => runtime.requestPasswordReset(fresh(), callerIp)));
+    }
+  };
   const password = randomUUID(), replacement = randomUUID();
   const attempts = new Map();
   const acceptedSignup = result => {
@@ -620,7 +626,7 @@ test("two-step email authentication preserves privacy and atomic state on Postgr
   await t.test("caller IP budget includes missing accounts and ignores forged forwarding headers", async () => {
     clock += 3600001;
     const before = mail.length;
-    for (let i = 0; i < 30; i++) await auth.requestPasswordReset(fresh(), "192.0.2.10");
+    await seedMissingResetRequests(auth, "192.0.2.10");
     await auth.requestPasswordReset(email, "192.0.2.10");
     await tick();
     assert.equal(mail.length, before);
@@ -717,7 +723,7 @@ test("two-step email authentication preserves privacy and atomic state on Postgr
   await t.test("mail without a trusted caller IP keeps independent addresses and the address budget", async () => {
     clock += 3600001;
     const runtime = new Auth(port, [], now, {}, settings);
-    for (let i = 0; i < 30; i++) await runtime.requestPasswordReset(fresh());
+    await seedMissingResetRequests(runtime);
     const address = fresh(), before = mail.length;
     await signup(address, password, runtime);
     await tick();

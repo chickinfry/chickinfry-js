@@ -52,6 +52,7 @@ are exported.
 - `@chickinfry/chickinfry`: HTTP transport, operation errors, session
   refresh, and the type-safe ORM core.
 - `@chickinfry/chickinfry/auth`: authentication runtime for generated servers.
+- `@chickinfry/chickinfry/auth/runtime`: host transaction adapter for generated servers.
 - `@chickinfry/chickinfry/postgres`: PostgreSQL adapter for generated repositories.
 - `@chickinfry/chickinfry/logging`: server console redaction with a secret snapshot.
 

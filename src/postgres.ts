@@ -203,7 +203,17 @@ export function createPostgresPort(connectionString: string, signal?: AbortSigna
           catch { closed = true; await end().catch(() => {}); }
         } else { closed = true; await end().catch(() => {}); }
         throw error;
-      } finally { active = false; }
+      } finally {
+        active = false;
+        if (begun && !closed) {
+          try { await client.query("discard all"); }
+          catch {
+            /** A reset failure must discard the connection without changing a confirmed transaction outcome. */
+            destroy();
+            await end().catch(() => {});
+          }
+        }
+      }
       // A completed COMMIT can report ROLLBACK; the server has already ended the transaction.
       if (commit.command !== "COMMIT") throw new Error("Transaction commit failed.");
       return value;

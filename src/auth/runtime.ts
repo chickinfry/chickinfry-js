@@ -7,6 +7,7 @@ import { AuthError } from "./core/errors.js";
 import { normalizeEmail, validateToken, cleanupCandidates, cleanupPage, emailPolicy, signupPolicy, emailLinkBase, renderAuthMail, type SessionPolicy } from "./core/rules.js";
 import { coreVersion } from "./core/version.js";
 import { resolveSignupRateLimit } from "./signup-rate-limit.js";
+import { withTransactionState } from "./transaction.js";
 import type { Tokens, BrowserSession, IdentityProvider, AuthUser, AuthActor, AuthOptions, SignupRateLimitOptions, SessionTransport, InviteSummary,
   AuthMailer, AuthMail, ActionTokenKind, Accepted, SignupAttempt, SignupHookResult } from "./core/types.js";
 
@@ -351,22 +352,20 @@ export class Auth {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let rejection: string | undefined;
     try {
-      const original = await Promise.race([
+      await Promise.race([
         new Promise<never>((_, reject) => { timer = setTimeout(() => reject(expire()), signupHookBudgetMillis); }),
-        (async () => {
-          const [settings] = await port.query("select current_setting('lock_timeout') as lock_timeout, current_setting('statement_timeout') as statement_timeout", []);
+        withTransactionState(port, async () => {
+          const [settings] = await port.query("select pg_catalog.current_setting('lock_timeout') as lock_timeout, pg_catalog.current_setting('statement_timeout') as statement_timeout", []);
           await limits();
           remaining();
           rejection = signupRejection(await hook.call(this.hooks, lease, user));
           await pending;
           remaining();
-          return settings;
-        })(),
+          active = false;
+          await port.query("select pg_catalog.set_config('lock_timeout', $1, true), pg_catalog.set_config('statement_timeout', $2, true)",
+            [settings.lock_timeout, settings.statement_timeout]);
+        }),
       ]);
-      active = false;
-      clearTimeout(timer);
-      await port.query("select set_config('lock_timeout', $1, true), set_config('statement_timeout', $2, true)",
-        [original.lock_timeout, original.statement_timeout]);
     } catch {
       if (!timedOut) {
         try { console.error(JSON.stringify({cause: "user_creation_failed"})); } catch {}

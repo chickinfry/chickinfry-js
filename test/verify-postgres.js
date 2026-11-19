@@ -425,10 +425,33 @@ test("one lazy connection serializes queries around a transaction and closes onc
     await assert.rejects(async () => tx.transaction(async () => {}), /Nested transactions/);
   }), port.query("after", [])]);
   assert.equal(connects, 1);
-  assert.deepEqual(queries, ["first", "begin", "inside", "commit", "after"]);
+  assert.deepEqual(queries, ["first", "begin", "inside", "commit", "discard all", "after"]);
   await Promise.all([port.close(), port.close()]);
   assert.equal(closes, 1);
   await assert.rejects(port.query("late", []), /closed/);
+});
+
+test("session reset failure discards the connection without changing the transaction outcome", async t => {
+  let closes = 0;
+  t.mock.method(pg.Client.prototype, "connect", callback => callback());
+  t.mock.method(pg.Client.prototype, "query", async sql => {
+    if (sql === "discard all") throw new Error("Session reset failed.");
+    return {command: sql.toUpperCase(), rows: []};
+  });
+  t.mock.method(pg.Client.prototype, "end", async () => { closes++; });
+  for (const fails of [false, true]) {
+    const port = createPostgresPort(localURL);
+    try {
+      const work = port.transaction(async () => {
+        if (fails) throw new Error("Work failed.");
+        return "committed";
+      });
+      if (fails) await assert.rejects(work, {message: "Work failed."});
+      else assert.equal(await work, "committed");
+      await assert.rejects(port.query("select 1", []), /closed/);
+    } finally { await port.close(); }
+  }
+  assert.equal(closes, 2);
 });
 
 test("a failed commit query keeps its unknown outcome and closes the connection", async t => {
@@ -518,7 +541,7 @@ test("PostgreSQL rejects a rolled-back commit and still commits a healthy transa
 }, async () => {
   const port = createPostgresPort(process.env.CHIK_TEST_DATABASE_URL);
   try {
-    await port.query("create temporary table commit_check (id integer primary key)", []);
+    await port.query("create table commit_check (id integer primary key)", []);
     await assert.rejects(port.transaction(async tx => {
       await tx.query("insert into commit_check values (1)", []);
       await assert.rejects(tx.query("insert into commit_check values (1)", []), {code: "23505"});
@@ -534,7 +557,10 @@ test("PostgreSQL rejects a rolled-back commit and still commits a healthy transa
       return "ok";
     }), "ok");
     assert.deepEqual(await port.query("select id from commit_check", []), [{id: 2}]);
-  } finally { await port.close(); }
+  } finally {
+    try { await port.query("drop table if exists commit_check", []); }
+    finally { await port.close(); }
+  }
 });
 
 test("TLS failure has no plaintext fallback and abort closes a real query", {
