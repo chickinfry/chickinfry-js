@@ -6,7 +6,7 @@ import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {fileURLToPath, pathToFileURL} from "node:url";
 import {createRealtimeClient, sessionRenewal} from "../dist/realtime/client.js";
-import {ClientError, OperationError, HttpTransport, MemoryStore, type SessionCredentials} from "../dist/http.js";
+import {BrowserHttpTransport, ClientError, OperationError, HttpTransport, MemoryStore, type SessionCredentials} from "../dist/http.js";
 
 const consumer = mkdtempSync(join(tmpdir(), "chickinfry-realtime-"));
 try {
@@ -47,6 +47,34 @@ try{
   await subscription.unsubscribe();
   const originalFetch = globalThis.fetch;
   try {
+    const isolatedOrigin = "https://22222222-2222-4222-8222-222222222222.chickinfry.io";
+    const isolatedEndpoint = "wss://33333333-3333-4333-8333-333333333333.chickinfry.io/realtime";
+    for (const transport of [new HttpTransport(isolatedOrigin), new BrowserHttpTransport(isolatedOrigin)]) {
+      globalThis.fetch = async input => {
+        assert.equal(String(input), isolatedOrigin+"/realtime.ticket");
+        return Response.json({ticket, endpoint: isolatedEndpoint});
+      };
+      const isolated = await createRealtimeClient(transport).subscribe("news");
+      assert.equal(connections.at(-1), isolatedEndpoint+"?ticket="+ticket);
+      await isolated.unsubscribe();
+    }
+    const connectionCount = connections.length;
+    for (const [issuer, endpoint] of [
+      ["https://22222222-2222-4222-8222-222222222222.chickinfry.app", isolatedEndpoint],
+      [isolatedOrigin+".example.com", isolatedEndpoint],
+      [isolatedOrigin.replace("22222222-2222-4222-8222-222222222222", "custom"), isolatedEndpoint],
+      [isolatedOrigin+":8443", isolatedEndpoint],
+      [isolatedOrigin, address],
+      [isolatedOrigin, isolatedEndpoint.replace(".io/", ".io.example.com/")],
+    ]) {
+      globalThis.fetch = async () => Response.json({ticket, endpoint});
+      await assert.rejects(createRealtimeClient(new HttpTransport(issuer)).subscribe("news"),
+        error => error instanceof ClientError && error.code === "internal");
+    }
+    await assert.rejects(createRealtimeClient({invoke:async()=>({ticket,endpoint:isolatedEndpoint})}).subscribe("news"),
+      error => error instanceof ClientError && error.code === "internal");
+    assert.equal(connections.length, connectionCount);
+
     let requests = 0;
     globalThis.fetch = async () => ++requests === 1 ? Response.json(null) : Response.json({ticket, endpoint: address});
     await assert.rejects(createRealtimeClient(new HttpTransport("https://example.com")).subscribe("news"),

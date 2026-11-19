@@ -1,5 +1,5 @@
 import type {ClientErrorCode, Transport} from "../http.js";
-import { ClientError, HttpTransport, OperationError } from "../http.js";
+import { BrowserHttpTransport, ClientError, HttpTransport, OperationError } from "../http.js";
 import { parseServerFrame, validChannel } from "./protocol.js";
 
 export interface SessionRenewal {
@@ -65,6 +65,19 @@ export interface RealtimeClient {
 }
 
 const ticketPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
+const defaultEndpointDomain = "chickinfry.app";
+const isolatedEndpointDomain = "chickinfry.io";
+
+function endpointDomain(transport: Transport): string {
+  const origin = transport instanceof HttpTransport ? transport["origin"] :
+    transport instanceof BrowserHttpTransport ? transport["origin"] : undefined;
+  const prefix = "https://";
+  const suffix = `.${isolatedEndpointDomain}`;
+  // Anchor the isolated ticket to its own HTTPS issuer before forwarding it to a socket.
+  if (origin?.startsWith(prefix) && origin.endsWith(suffix) &&
+      ticketPattern.test(origin.slice(prefix.length, -suffix.length))) return isolatedEndpointDomain;
+  return defaultEndpointDomain;
+}
 
 interface SharedRenewal {
   readonly watchers: Set<(error: unknown) => void>;
@@ -116,6 +129,7 @@ export function createRealtimeClient(transport: RealtimeTransport): RealtimeClie
 }
 
 async function subscribe(transport: Transport, channel: string, onGap: GapHandler | undefined, renewal: SessionRenewal | undefined): Promise<RealtimeSubscription> {
+  const domain = endpointDomain(transport);
   const subscription = crypto.randomUUID();
   const queue: import("./protocol.js").RealtimeEventFrame[] = [];
   const pending = new Set<() => void>();
@@ -313,7 +327,7 @@ async function subscribe(transport: Transport, channel: string, onGap: GapHandle
         response = await transport.invoke("realtime.ticket", {}) as Record<string, unknown>;
         if (!active) return;
         if (typeof response !== "object" || response === null || typeof response.ticket !== "string" || !ticketPattern.test(response.ticket)) throw new ClientError("internal");
-        endpoint = realtimeEndpoint(response.endpoint);
+        endpoint = realtimeEndpoint(response.endpoint, domain);
       } catch (error) {
         if (!active) return;
         if (initialReady && error instanceof OperationError && error.status === 409) return stop(error);
@@ -395,11 +409,11 @@ async function subscribe(transport: Transport, channel: string, onGap: GapHandle
 }
 
 /** Validates the product address before attaching a one-use ticket. */
-export function realtimeEndpoint(value: unknown): string {
+export function realtimeEndpoint(value: unknown, domain = defaultEndpointDomain): string {
   if (typeof value !== "string") throw new ClientError("internal");
   let url: URL;
   try { url = new URL(value); } catch { throw new ClientError("internal"); }
-  const suffix = ".chickinfry.app";
+  const suffix = `.${domain}`;
   if (url.protocol !== "wss:" || !url.hostname.endsWith(suffix) || !ticketPattern.test(url.hostname.slice(0, -suffix.length)) ||
       url.port || url.username || url.password || url.pathname !== "/realtime" || url.search || url.hash || url.href !== value) throw new ClientError("internal");
   return value;
