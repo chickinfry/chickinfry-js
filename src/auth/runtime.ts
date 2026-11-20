@@ -401,6 +401,31 @@ export class Auth {
     await this.port.transaction(port => this.flows.commitBrowserLogout(createStore(port), accessToken));
   }
 
+  async startDeviceAuthorization(input: {deviceName?: unknown}, callerIp?: string) {
+    const started = await this.flows.startDevice(input, callerIp);
+    this.scheduleCleanup();
+    return started;
+  }
+
+  async describeDeviceAuthorization(code: string, callerIp?: string) {
+    return this.flows.describeDevice(code, callerIp);
+  }
+
+  async approveDeviceAuthorization(user: {id: string}, code: string, callerIp?: string) {
+    return this.flows.approveDevice(user, code, callerIp);
+  }
+
+  async denyDeviceAuthorization(user: {id: string}, code: string, callerIp?: string) {
+    return this.flows.denyDevice(user, code, callerIp);
+  }
+
+  async pollDeviceAuthorization(deviceCode: string, callerIp?: string): Promise<Tokens> {
+    const {candidate} = await this.flows.pollDevice(deviceCode, callerIp);
+    const tokens = await this.port.transaction(port => this.flows.commitDeviceExchange(createStore(port), candidate));
+    this.scheduleCleanup();
+    return tokens;
+  }
+
   async refresh(refreshToken: string): Promise<Tokens> {
     validateToken(refreshToken);
     const stored = await this.flows.prepareRefresh(refreshToken);
@@ -469,6 +494,7 @@ export class Auth {
     }
     if (!signal.aborted) await this.cleanupSignupRequests(db, signal);
     if (!signal.aborted) await this.cleanupInvites(db, signal);
+    if (!signal.aborted) await this.cleanupDeviceRequests(db, signal);
     if (!signal.aborted && this.options.mailer) {
       try {
         const cutoff = this.timestamp();
@@ -480,6 +506,21 @@ export class Auth {
           }
         }
       } catch { cleanupFailure("action_token"); }
+    }
+  }
+
+  private async cleanupDeviceRequests(db: RuntimeStore, signal: AbortSignal): Promise<void> {
+    try {
+      signal.throwIfAborted();
+      const cutoff = this.timestamp();
+      for (const row of await db.expiredDeviceRequests(cutoff, cleanupLimit)) {
+        signal.throwIfAborted();
+        await db.transaction(tx => this.flows.commitCleanupDeviceRequest(tx, row, cutoff));
+      }
+    } catch (error) {
+      // Runtimes without the device migration still serve the other authentication paths.
+      if (typeof error === "object" && error !== null && "code" in error && (error.code === "42P01" || error.code === "23503")) return;
+      cleanupFailure("device_authorization");
     }
   }
 

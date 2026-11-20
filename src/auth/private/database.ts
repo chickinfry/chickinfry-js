@@ -100,6 +100,128 @@ export const appAuthActionTokensTable = defineTable<AppAuthActionTokensRow>({
   },
 });
 
+export interface AppAuthDeviceRequestsRow {
+  readonly approvedAt: string | null;
+  readonly consumedAt: string | null;
+  readonly createdAt: string;
+  readonly deviceCodeHash: string;
+  readonly deviceName: string | null;
+  readonly expiresAt: string;
+  readonly id: string;
+  readonly lastPolledAt: string | null;
+  readonly status: string;
+  readonly userCodeHash: string;
+  readonly userId: string | null;
+}
+
+export interface AppAuthDeviceRequestsInsert {
+  readonly approvedAt?: string | null;
+  readonly consumedAt?: string | null;
+  readonly createdAt?: string;
+  readonly deviceCodeHash: string;
+  readonly deviceName?: string | null;
+  readonly expiresAt: string;
+  readonly id?: string;
+  readonly lastPolledAt?: string | null;
+  readonly status?: string;
+  readonly userCodeHash: string;
+  readonly userId?: string | null;
+}
+
+export interface AppAuthDeviceRequestsUpdate {
+  readonly approvedAt?: string | null;
+  readonly consumedAt?: string | null;
+  readonly createdAt?: string;
+  readonly deviceCodeHash?: string;
+  readonly deviceName?: string | null;
+  readonly expiresAt?: string;
+  readonly lastPolledAt?: string | null;
+  readonly status?: string;
+  readonly userCodeHash?: string;
+  readonly userId?: string | null;
+}
+
+
+export interface AppAuthDeviceRequestsPrimaryKey {
+  readonly id: string;
+}
+
+export const appAuthDeviceRequestsTable = defineTable<AppAuthDeviceRequestsRow>({
+  name: "app_auth_device_requests",
+  primaryKey: ["id",],
+  requiredInsertColumns: ["deviceCodeHash","expiresAt","userCodeHash",],
+  columns: {
+    approvedAt: {
+      databaseName: "approved_at",
+      encode: (value) => encodeValue("timestamp", true, value),
+      decode: (value) => decodeValue("timestamp", true, value) as string | null,
+    },
+    consumedAt: {
+      databaseName: "consumed_at",
+      encode: (value) => encodeValue("timestamp", true, value),
+      decode: (value) => decodeValue("timestamp", true, value) as string | null,
+    },
+    createdAt: {
+      databaseName: "created_at",
+      encode: (value) => encodeValue("timestamp", false, value),
+      decode: (value) => decodeValue("timestamp", false, value) as string,
+    },
+    deviceCodeHash: {
+      databaseName: "device_code_hash",
+      encode: (value) => encodeValue("string", false, value),
+      decode: (value) => decodeValue("string", false, value) as string,
+    },
+    deviceName: {
+      databaseName: "device_name",
+      encode: (value) => encodeValue("string", true, value),
+      decode: (value) => decodeValue("string", true, value) as string | null,
+    },
+    expiresAt: {
+      databaseName: "expires_at",
+      encode: (value) => encodeValue("timestamp", false, value),
+      decode: (value) => decodeValue("timestamp", false, value) as string,
+    },
+    id: {
+      databaseName: "id",
+      encode: (value) => encodeValue("id", false, value),
+      decode: (value) => decodeValue("id", false, value) as string,
+    },
+    lastPolledAt: {
+      databaseName: "last_polled_at",
+      encode: (value) => encodeValue("timestamp", true, value),
+      decode: (value) => decodeValue("timestamp", true, value) as string | null,
+    },
+    status: {
+      databaseName: "status",
+      encode: (value) => encodeValue("string", false, value),
+      decode: (value) => decodeValue("string", false, value) as string,
+    },
+    userCodeHash: {
+      databaseName: "user_code_hash",
+      encode: (value) => encodeValue("string", false, value),
+      decode: (value) => decodeValue("string", false, value) as string,
+    },
+    userId: {
+      databaseName: "user_id",
+      encode: (value) => encodeValue("id", true, value),
+      decode: (value) => decodeValue("id", true, value) as string | null,
+    },
+  },
+  constraints: {
+    approvedAt: { unique: false, references: "" },
+    consumedAt: { unique: false, references: "" },
+    createdAt: { unique: false, references: "" },
+    deviceCodeHash: { unique: true, references: "" },
+    deviceName: { unique: false, references: "" },
+    expiresAt: { unique: false, references: "" },
+    id: { unique: false, references: "" },
+    lastPolledAt: { unique: false, references: "" },
+    status: { unique: false, references: "" },
+    userCodeHash: { unique: true, references: "" },
+    userId: { unique: false, references: "app_auth_users.id" },
+  },
+});
+
 export interface AppAuthIdentitiesRow {
   readonly createdAt: string;
   readonly provider: string;
@@ -790,6 +912,7 @@ export const appAuthUsersTable = defineTable<AppAuthUsersRow>({
 
 export interface Database {
   readonly appAuthActionTokens: Repository<AppAuthActionTokensRow, AppAuthActionTokensInsert, AppAuthActionTokensUpdate, AppAuthActionTokensPrimaryKey>;
+  readonly appAuthDeviceRequests: Repository<AppAuthDeviceRequestsRow, AppAuthDeviceRequestsInsert, AppAuthDeviceRequestsUpdate, AppAuthDeviceRequestsPrimaryKey>;
   readonly appAuthIdentities: Repository<AppAuthIdentitiesRow, AppAuthIdentitiesInsert, AppAuthIdentitiesUpdate, AppAuthIdentitiesPrimaryKey>;
   readonly appAuthInvites: Repository<AppAuthInvitesRow, AppAuthInvitesInsert, AppAuthInvitesUpdate, AppAuthInvitesPrimaryKey>;
   readonly appAuthMigrations: Repository<AppAuthMigrationsRow, AppAuthMigrationsInsert, AppAuthMigrationsUpdate, AppAuthMigrationsPrimaryKey>;
@@ -804,6 +927,7 @@ export interface Database {
 export function createDatabase(port: DatabasePort): Database {
   return {
     appAuthActionTokens: new Repository<AppAuthActionTokensRow, AppAuthActionTokensInsert, AppAuthActionTokensUpdate, AppAuthActionTokensPrimaryKey>(port, appAuthActionTokensTable),
+    appAuthDeviceRequests: new Repository<AppAuthDeviceRequestsRow, AppAuthDeviceRequestsInsert, AppAuthDeviceRequestsUpdate, AppAuthDeviceRequestsPrimaryKey>(port, appAuthDeviceRequestsTable),
     appAuthIdentities: new Repository<AppAuthIdentitiesRow, AppAuthIdentitiesInsert, AppAuthIdentitiesUpdate, AppAuthIdentitiesPrimaryKey>(port, appAuthIdentitiesTable),
     appAuthInvites: new Repository<AppAuthInvitesRow, AppAuthInvitesInsert, AppAuthInvitesUpdate, AppAuthInvitesPrimaryKey>(port, appAuthInvitesTable),
     appAuthMigrations: new Repository<AppAuthMigrationsRow, AppAuthMigrationsInsert, AppAuthMigrationsUpdate, AppAuthMigrationsPrimaryKey>(port, appAuthMigrationsTable),

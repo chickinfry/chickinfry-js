@@ -2,7 +2,8 @@ import { Auth, AuthError, type Tokens, type InviteSummary, type BrowserSession, 
 
 export const authOperations = ["auth.signup", "auth.signin", "auth.refresh", "auth.session", "auth.logout", "auth.identity",
   "auth.invite_issue", "auth.invite_list", "auth.invite_revoke",
-  "auth.send_verification_email", "auth.verify_email", "auth.request_password_reset", "auth.reset_password"];
+  "auth.send_verification_email", "auth.verify_email", "auth.request_password_reset", "auth.reset_password",
+  "auth.start_device_authorization", "auth.describe_device_authorization", "auth.approve_device_authorization", "auth.deny_device_authorization", "auth.poll_device_authorization"];
 
 export function bearer(request: Request): string {
   const match = /^Bearer ([A-Za-z0-9_-]{43})$/i.exec(request.headers.get("authorization") ?? "");
@@ -32,6 +33,26 @@ export async function invokeAuth(auth: Auth, operation: string, input: unknown, 
     return bearer(request);
   };
   switch (operation) {
+    case "auth.start_device_authorization": {
+      const started = await auth.startDeviceAuthorization({deviceName: value.device_name}, callerIp);
+      return {device_code: started.deviceCode, user_code: started.userCode,
+        verification_uri: started.verificationUri, expires_at: started.expiresAt};
+    }
+    case "auth.describe_device_authorization": {
+      const details = await auth.describeDeviceAuthorization(text("user_code"), callerIp);
+      return {device_name: details.deviceName, created_at: details.createdAt, expires_at: details.expiresAt};
+    }
+    case "auth.approve_device_authorization": {
+      const user = await authenticatedUser(auth, browser, request);
+      const result = await auth.approveDeviceAuthorization(user, text("user_code"), callerIp);
+      return {status: result.status, expires_at: result.expiresAt};
+    }
+    case "auth.deny_device_authorization": {
+      const user = await authenticatedUser(auth, browser, request);
+      const result = await auth.denyDeviceAuthorization(user, text("user_code"), callerIp);
+      return {status: result.status};
+    }
+    case "auth.poll_device_authorization": return tokens(await auth.pollDeviceAuthorization(text("device_code"), callerIp));
     case "auth.send_verification_email": return auth.sendVerificationEmail(
       Object.hasOwn(value, "attempt") ? {attempt: !Object.hasOwn(value, "email") ? text("attempt") : ""} : text("email"), callerIp);
     case "auth.request_password_reset": return auth.requestPasswordReset(text("email"), callerIp);
@@ -107,6 +128,12 @@ function tokens(value: Tokens) {
   return {access_token: value.accessToken, refresh_token: value.refreshToken,
     expires_at: value.expiresAt, refresh_expires_at: value.refreshExpiresAt,
     user_id: value.userId, session_id: value.sessionId, email_verified: value.emailVerified};
+}
+
+async function authenticatedUser(auth: Auth, browser: BrowserRequest | undefined, request: Request) {
+  if (browser) return auth.session(browser.credential, "browser");
+  if (!request.headers.has("authorization")) throw new AuthError("unauthenticated", 401);
+  return auth.session(bearer(request));
 }
 
 export interface BrowserRequest {

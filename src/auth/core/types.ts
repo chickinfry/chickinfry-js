@@ -22,6 +22,24 @@ export interface BrowserSession {
   readonly emailVerified: boolean;
 }
 
+export interface DeviceAuthorization {
+  readonly deviceCode: string;
+  readonly userCode: string;
+  readonly verificationUri: string;
+  readonly expiresAt: string;
+}
+
+export interface DeviceDetails {
+  readonly deviceName: string | null;
+  readonly createdAt: string;
+  readonly expiresAt: string;
+}
+
+export interface DeviceApproval {
+  readonly status: "approved" | "denied";
+  readonly expiresAt: string;
+}
+
 export interface IdentityProvider {
   readonly id: string;
   verify(credential: unknown): Promise<{ readonly subject: string; readonly verifiedEmail: string }>;
@@ -53,6 +71,7 @@ export interface AuthOptions {
   readonly email?: { readonly verification: "required" | "off" };
   readonly mailer?: AuthMailer;
   readonly emailLinkBase?: string;
+  readonly deviceVerificationBase?: string;
   readonly projectName?: string;
 }
 

@@ -154,5 +154,22 @@ function databaseStore(db: Database): RuntimeStore {
       c => and(c.expiresAt.eq(row.expiresAt), c.attemptCount.eq(row.attemptCount), c.expiresAt.lte(cutoff)),
       {attemptCount: row.attemptCount}),
     deleteRateLimit: async key => { await db.appAuthRateLimits.delete(key); },
+    createDeviceRequest: values => db.appAuthDeviceRequests.insert(values),
+    deviceRequestByCodeHash: async hash => (await db.appAuthDeviceRequests.findMany({
+      where: c => c.deviceCodeHash.eq(hash), limit: 1,
+    }))[0],
+    deviceRequestByUserCodeHash: async hash => (await db.appAuthDeviceRequests.findMany({
+      where: c => c.userCodeHash.eq(hash), limit: 1,
+    }))[0],
+    updatePendingDeviceRequest: (id, at, values) => db.appAuthDeviceRequests.updateIf({id},
+      c => and(c.status.eq("pending"), c.expiresAt.gt(at)), values),
+    updateApprovedDeviceRequest: (id, at, values) => db.appAuthDeviceRequests.updateIf({id},
+      c => and(c.status.eq("approved"), c.consumedAt.isNull(), c.expiresAt.gt(at)), values),
+    deleteDeviceRequest: async id => { await db.appAuthDeviceRequests.delete({id}); },
+    expiredDeviceRequests: (cutoff, limit) => db.appAuthDeviceRequests.findMany({
+      where: c => c.expiresAt.lte(cutoff), orderBy: c => [c.expiresAt.asc(), c.id.asc()], limit,
+    }),
+    lockExpiredDeviceRequest: (row, cutoff) => db.appAuthDeviceRequests.updateIf({id: row.id},
+      c => and(c.expiresAt.lte(cutoff), c.status.eq(row.status)), {lastPolledAt: row.lastPolledAt}),
   };
 }

@@ -3,6 +3,7 @@ package invitations_test
 import (
 	"context"
 	"encoding/hex"
+	"maps"
 	"net/url"
 	"os"
 	"os/exec"
@@ -76,7 +77,10 @@ func TestInvitationsWithPostgreSQL(t *testing.T) {
 		t.Fatal("cannot connect to the disposable authentication database")
 	}
 	defer conn.Close(context.Background())
-	for _, feature := range []string{"core", "email_verification"} {
+	// Apply every feature the pinned generator ships, so a new step is never
+	// silently missing from this fixture.
+	features := slices.Sorted(maps.Keys(module.Features))
+	for _, feature := range features {
 		for _, step := range module.Features[feature] {
 			tx, err := conn.Begin(t.Context())
 			if err != nil {

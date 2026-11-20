@@ -27,6 +27,50 @@ export const signupPolicy = Object.freeze({
   maximumActiveRequests: 3,
 });
 
+export const devicePolicy = Object.freeze({
+  lifetimeMillis: 10 * 60_000,
+  intervalMillis: 5_000,
+  slowDownMillis: 5_000,
+  attemptWindowMillis: 10 * 60_000,
+  attemptMaximum: 10,
+  // Hosts without a trusted client address cannot separate callers, so one shared
+  // budget must not block ordinary sign-ins; the ~39.6-bit code and 10-minute
+  // lifetime remain the brute-force bound.
+  sharedAttemptMaximum: 600,
+  startWindowMillis: 10 * 60_000,
+  startMaximum: 10,
+  maximumDeviceNameLength: 64,
+  alphabet: "ABCDEFGHJKLMNPQRSTVWXYZ23456789",
+  codeLength: 8,
+});
+
+/** The user code is shown grouped as XXXX-XXXX; input is normalized to the same form. */
+/** Device verification pages live under the project's public auth surface. */
+export function deviceVerificationUri(base: string | undefined): string {
+  if (base === undefined) throw new AuthError("device_unavailable", 503);
+  return base.replace(/\/$/, "") + "/auth/device";
+}
+
+export function normalizeUserCode(value: string): string {
+  if (typeof value !== "string") throw new AuthError("invalid_input", 400);
+  const compact = value.replace(/[\s-]/g, "").toUpperCase();
+  if (compact.length !== devicePolicy.codeLength || [...compact].some(c => !devicePolicy.alphabet.includes(c))) {
+    throw new AuthError("invalid_input", 400);
+  }
+  return compact.slice(0, 4) + "-" + compact.slice(4);
+}
+
+export function deviceName(value: unknown): string | null {
+  if (value === undefined) return null;
+  if (typeof value !== "string") throw new AuthError("invalid_input", 400);
+  const name = value.trim();
+  if (name === "") return null;
+  if (name.length > devicePolicy.maximumDeviceNameLength || /[\u0000-\u001f\u007f]/.test(name)) {
+    throw new AuthError("invalid_input", 400);
+  }
+  return name;
+}
+
 export function actionTokenExpiry(kind: ActionTokenKind, now: number): string {
   return new Date(now + (kind === "email_verification"
     ? emailPolicy.verificationLifetimeMillis : emailPolicy.resetLifetimeMillis)).toISOString();

@@ -1,11 +1,12 @@
 import { Buffer } from "node:buffer";
-import { hashPassword, verifyPassword, randomToken, hashToken, randomCode, hashCode, verifyCode } from "./crypto.js";
+import { hashPassword, verifyPassword, randomToken, hashToken, randomCode, hashCode, verifyCode, randomCodeFrom } from "./crypto.js";
 import { sessionPolicy, sessionExpiry, sessionState, cookieMaxAge, accessLifetimeMillis, normalizeEmail, validatePassword, nextRateLimit,
-  emailPolicy, signupPolicy, emailSigninAllowed, mailRateKeys, actionTokenExpiry, type SessionPolicy } from "./rules.js";
+  emailPolicy, signupPolicy, emailSigninAllowed, mailRateKeys, actionTokenExpiry, devicePolicy, normalizeUserCode, deviceName, deviceVerificationUri, type SessionPolicy } from "./rules.js";
 import { AuthError } from "./errors.js";
-import type { Store, AppAuthUsersRow, AppAuthInvitesRow, AppAuthSessionsRow, AppAuthRefreshTokensRow, AppAuthRateLimitsRow, AppAuthSignupRequestsRow } from "./store.js";
+import type { Store, AppAuthUsersRow, AppAuthInvitesRow, AppAuthSessionsRow, AppAuthRefreshTokensRow, AppAuthRateLimitsRow, AppAuthSignupRequestsRow,
+  AppAuthDeviceRequestsRow } from "./store.js";
 import type { Tokens, BrowserSession, IdentityProvider, AuthUser, AuthOptions, SessionTransport, InviteSummary, AuthActor, ActionTokenKind,
-  SignupRateLimitOptions } from "./types.js";
+  SignupRateLimitOptions, DeviceAuthorization, DeviceApproval, DeviceDetails } from "./types.js";
 
 const day = 24 * 60 * 60_000;
 
@@ -277,6 +278,96 @@ export class Flows {
     return this.issue(tx, user, transport, previousCredential);
   }
 
+  async startDevice(input: {deviceName?: unknown}, callerIp?: string): Promise<DeviceAuthorization> {
+    const name = deviceName(input.deviceName);
+    await this.rateLimit("device_start", callerIp ? "ip:" + callerIp : "shared",
+      callerIp ? devicePolicy.startMaximum : devicePolicy.sharedAttemptMaximum, devicePolicy.startWindowMillis);
+    const deviceCode = randomToken();
+    let userCode: string;
+    do {
+      userCode = randomCodeFrom(devicePolicy.alphabet, devicePolicy.codeLength);
+    } while (await this.db.deviceRequestByUserCodeHash(hashToken(normalizeUserCode(userCode))));
+    const expiresAt = new Date(this.now() + devicePolicy.lifetimeMillis).toISOString();
+    await this.db.createDeviceRequest({
+      deviceCodeHash: hashToken(deviceCode),
+      userCodeHash: hashToken(normalizeUserCode(userCode)),
+      status: "pending",
+      userId: null,
+      deviceName: name,
+      expiresAt,
+      createdAt: this.timestamp(),
+    });
+    return {deviceCode, userCode: normalizeUserCode(userCode),
+      verificationUri: deviceVerificationUri(this.options.deviceVerificationBase), expiresAt};
+  }
+
+  // The approval page shows what the terminal asked for before the person approves.
+  async describeDevice(code: string, callerIp?: string): Promise<DeviceDetails> {
+    const candidate = await this.lookupDevice(code, callerIp);
+    return {deviceName: candidate.deviceName, createdAt: candidate.createdAt, expiresAt: candidate.expiresAt};
+  }
+
+  private async lookupDevice(code: string, callerIp?: string): Promise<AppAuthDeviceRequestsRow> {
+    await this.rateLimit("device_code", callerIp ? "ip:" + callerIp : "shared",
+      callerIp ? devicePolicy.attemptMaximum : devicePolicy.sharedAttemptMaximum, devicePolicy.attemptWindowMillis);
+    const candidate = await this.db.deviceRequestByUserCodeHash(hashToken(normalizeUserCode(code)));
+    if (!candidate) throw new AuthError("device_code_invalid", 400);
+    if (Date.parse(candidate.expiresAt) <= this.now()) throw new AuthError("expired_token", 400);
+    if (candidate.status !== "pending") throw new AuthError("device_code_used", 400);
+    return candidate;
+  }
+
+  async approveDevice(user: {id: string}, code: string, callerIp?: string): Promise<DeviceApproval> {
+    return this.decideDevice(user, code, "approved", callerIp);
+  }
+
+  async denyDevice(user: {id: string}, code: string, callerIp?: string): Promise<DeviceApproval> {
+    return this.decideDevice(user, code, "denied", callerIp);
+  }
+
+  private async decideDevice(user: {id: string}, code: string, status: "approved" | "denied", callerIp?: string): Promise<DeviceApproval> {
+    const candidate = await this.lookupDevice(code, callerIp);
+    const now = this.timestamp();
+    const values = status === "approved"
+      ? {status, userId: user.id, approvedAt: now}
+      : {status};
+    const updated = await this.db.updatePendingDeviceRequest(candidate.id, now, values);
+    if (!updated) throw new AuthError("device_code_used", 400);
+    return {status, expiresAt: candidate.expiresAt};
+  }
+
+  async pollDevice(deviceCode: string, callerIp?: string): Promise<{candidate: AppAuthDeviceRequestsRow; userId: string}> {
+    // Polling is already bounded by the request lifetime and interval; a caller-wide
+    // budget here would reject legitimate long waits on shared egress addresses.
+
+    if (typeof deviceCode !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(deviceCode)) throw new AuthError("invalid_input", 400);
+    const candidate = await this.db.deviceRequestByCodeHash(hashToken(deviceCode));
+    if (!candidate) throw new AuthError("invalid_grant", 400);
+    if (Date.parse(candidate.expiresAt) <= this.now()) {
+      if (candidate.status === "pending" || candidate.status === "approved") {
+        await this.db.updatePendingDeviceRequest(candidate.id, this.timestamp(), {status: "expired"});
+      }
+      throw new AuthError("expired_token", 400);
+    }
+    if (candidate.status === "pending") {
+      // The first poll only records the client's clock; later polls must respect the interval.
+      const waited = candidate.lastPolledAt === null ? Number.POSITIVE_INFINITY : this.now() - Date.parse(candidate.lastPolledAt);
+      await this.db.updatePendingDeviceRequest(candidate.id, this.timestamp(), {lastPolledAt: this.timestamp()});
+      if (waited < devicePolicy.intervalMillis) throw new AuthError("slow_down", 400);
+      throw new AuthError("authorization_pending", 400);
+    }
+    if (candidate.status !== "approved" || candidate.userId === null) throw new AuthError("access_denied", 400);
+    return {candidate, userId: candidate.userId};
+  }
+
+  async commitDeviceExchange(tx: Store, candidate: AppAuthDeviceRequestsRow): Promise<Tokens> {
+    const claimed = await tx.updateApprovedDeviceRequest(candidate.id, this.timestamp(), {status: "exchanged", consumedAt: this.timestamp()});
+    if (!claimed || claimed.userId === null) throw new AuthError("access_denied", 400);
+    const user = await tx.user(claimed.userId);
+    if (!user || user.disabledAt !== null) throw new AuthError("access_denied", 400);
+    return this.issue(tx, user, "native") as Promise<Tokens>;
+  }
+
   async prepareRefresh(refreshToken: string) {
     const stored = await this.db.refreshByToken(hashToken(refreshToken));
     if (!stored) throw new AuthError("invalid_token", 401);
@@ -392,6 +483,11 @@ export class Flows {
   async commitCleanupRateLimit(tx: Store, candidate: AppAuthRateLimitsRow, cutoff: string) {
     const locked = await tx.lockRateLimit(candidate, cutoff);
     if (locked) await tx.deleteRateLimit({action: candidate.action, keyHash: candidate.keyHash});
+  }
+
+  async commitCleanupDeviceRequest(tx: Store, row: AppAuthDeviceRequestsRow, cutoff: string) {
+    const locked = await tx.lockExpiredDeviceRequest(row, cutoff);
+    if (locked) await tx.deleteDeviceRequest(row.id);
   }
 
   async commitCleanupInvite(tx: Store, row: AppAuthInvitesRow, cutoff: string) {

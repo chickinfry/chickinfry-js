@@ -80,6 +80,20 @@ export interface AppAuthSignupRequestsRow {
   readonly updatedAt: string;
 }
 
+export interface AppAuthDeviceRequestsRow {
+  readonly approvedAt: string | null;
+  readonly consumedAt: string | null;
+  readonly createdAt: string;
+  readonly deviceCodeHash: string;
+  readonly deviceName: string | null;
+  readonly expiresAt: string;
+  readonly id: string;
+  readonly lastPolledAt: string | null;
+  readonly status: string;
+  readonly userCodeHash: string;
+  readonly userId: string | null;
+}
+
 export interface Store {
   signup(id: string): Promise<AppAuthSignupRequestsRow | null | undefined>;
   signupsByEmail(email: string): Promise<AppAuthSignupRequestsRow[]>;
@@ -139,6 +153,14 @@ export interface Store {
   expiredRateLimits(cutoff: string, limit: number): Promise<AppAuthRateLimitsRow[]>;
   lockRateLimit(row: AppAuthRateLimitsRow, cutoff: string): Promise<AppAuthRateLimitsRow | undefined>;
   deleteRateLimit(key: RateKey): Promise<void>;
+  createDeviceRequest(values: Omit<AppAuthDeviceRequestsRow, "id" | "approvedAt" | "consumedAt" | "lastPolledAt">): Promise<AppAuthDeviceRequestsRow>;
+  deviceRequestByCodeHash(hash: string): Promise<AppAuthDeviceRequestsRow | undefined>;
+  deviceRequestByUserCodeHash(hash: string): Promise<AppAuthDeviceRequestsRow | undefined>;
+  updatePendingDeviceRequest(id: string, at: string, values: Partial<Pick<AppAuthDeviceRequestsRow, "status" | "userId" | "approvedAt" | "consumedAt" | "lastPolledAt">>): Promise<AppAuthDeviceRequestsRow | undefined>;
+  updateApprovedDeviceRequest(id: string, at: string, values: Partial<Pick<AppAuthDeviceRequestsRow, "status" | "consumedAt">>): Promise<AppAuthDeviceRequestsRow | undefined>;
+  deleteDeviceRequest(id: string): Promise<void>;
+  expiredDeviceRequests(cutoff: string, limit: number): Promise<AppAuthDeviceRequestsRow[]>;
+  lockExpiredDeviceRequest(row: AppAuthDeviceRequestsRow, cutoff: string): Promise<AppAuthDeviceRequestsRow | undefined>;
 }
 
 export type RateKey = Pick<AppAuthRateLimitsRow, "action" | "keyHash">;

@@ -40,6 +40,10 @@ export function randomCode(): string {
   return randomInt(10 ** 6).toString().padStart(6, "0");
 }
 
+export function randomCodeFrom(alphabet: string, length: number): string {
+  return Array.from({length}, () => alphabet[randomInt(alphabet.length)]).join("");
+}
+
 export function hashCode(email: string, code: string): string {
   return hashToken(email + "\0" + code);
 }
