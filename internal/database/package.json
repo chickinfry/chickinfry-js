@@ -1,0 +1,13 @@
+{
+  "name": "@chickinfry/internal-database-adapter",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "pg": "8.23.0",
+    "pg-cloudflare": "1.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.3",
+    "@types/pg": "8.23.1"
+  }
+}

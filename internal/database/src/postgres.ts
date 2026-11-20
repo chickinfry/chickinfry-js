@@ -1,9 +1,9 @@
 import pg from "pg";
 import { BlockList, isIP, Socket } from "node:net";
-import type { DatabasePort } from "./orm.js";
+import { cleanupBudgetMillis } from "../../../dist/database-budget.js";
+import type { DatabasePort } from "../../../dist/orm.js";
 
-/** The cleanup port's connection wait is part of the same budget that aborts the whole cleanup task. */
-export const cleanupBudgetMillis = 5_000;
+export { cleanupBudgetMillis };
 
 export interface PostgresPort extends DatabasePort {
   close(): Promise<void>;

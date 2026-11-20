@@ -4,9 +4,11 @@ import dns from "node:dns";
 import net from "node:net";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import pg from "pg";
-import { createPostgresPort, cleanupBudgetMillis } from "../dist/postgres.js";
+import { createRequire } from "node:module";
+import { createPostgresPort, cleanupBudgetMillis } from "../internal/database/dist/postgres.js";
 import { Auth } from "../dist/auth/runtime.js";
+
+const pg = createRequire(new URL("../internal/database/package.json", import.meta.url))("pg");
 
 const localURL = "postgresql://user:private@127.0.0.1:5432/customer?sslmode=disable";
 
@@ -44,11 +46,11 @@ test("Workers cancellation settles before connect and after close without uncaug
     import assert from "node:assert/strict";
     import { createRequire } from "node:module";
     Object.defineProperty(globalThis, "navigator", {value:{userAgent:"Cloudflare-Workers"}, configurable:true});
-    const require = createRequire(import.meta.url);
+    const require = createRequire(new URL("./internal/database/package.json", import.meta.url));
     const pg = require("pg"), {CloudflareSocket} = require("pg-cloudflare");
     assert.equal(require("pg/package.json").version, "8.23.0");
     assert.equal(require("pg-cloudflare/package.json").version, "1.4.0");
-    const {createPostgresPort} = await import("./dist/postgres.js");
+    const {createPostgresPort} = await import("./internal/database/dist/postgres.js");
     let networkConnections = 0, socketClosures = 0;
     const uncaught = [], streams = [];
     process.on("uncaughtException", error => {
@@ -302,8 +304,9 @@ test("Node TLS negotiates required PLUS and rejects a SCRAM server without PLUS"
     import fs from "node:fs";
     import net from "node:net";
     import tls from "node:tls";
-    import pg from "pg";
-    import {createPostgresPort} from "./dist/postgres.js";
+    import { createRequire } from "node:module";
+    const pg = createRequire(new URL("./internal/database/package.json", import.meta.url))("pg");
+    import {createPostgresPort} from "./internal/database/dist/postgres.js";
     const original = new URL(process.env.CHIK_TEST_DATABASE_URL);
     const sockets = new Set(), mechanisms = [], clients = [];
     const connect = pg.Client.prototype.connect;

@@ -105,7 +105,7 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 const actionToken = mail => new URLSearchParams(new URL(mail.text.split("\n").find(line => line.startsWith("https://"))).hash.slice(1)).get("token");
 
 test("two-step email authentication preserves privacy and atomic state on PostgreSQL", {skip: !url, timeout: 180000}, async t => {
-  const {createPostgresPort} = await import("../dist/postgres.js");
+  const {createPostgresPort} = await import("../internal/database/dist/postgres.js");
   const {createDatabase} = await import("../dist/auth/private/database.js");
   const {createStore} = await import("../dist/auth/store.js");
   const {invokeAuth, browserRequest} = await import("../dist/auth/router.js");

@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { Auth, AuthError } from "../dist/auth/runtime.js";
-import { createPostgresPort } from "../dist/postgres.js";
+import { createPostgresPort } from "../internal/database/dist/postgres.js";
 import { createDatabase } from "../dist/auth/private/database.js";
 
 const failed = work => assert.rejects(work, error => error instanceof AuthError

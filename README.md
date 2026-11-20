@@ -53,8 +53,9 @@ are exported.
   refresh, and the type-safe ORM core.
 - `@chickinfry/chickinfry/auth`: authentication runtime for generated servers.
 - `@chickinfry/chickinfry/auth/runtime`: host transaction adapter for generated servers.
-- `@chickinfry/chickinfry/postgres`: PostgreSQL adapter for generated repositories.
 - `@chickinfry/chickinfry/logging`: server console redaction with a secret snapshot.
+
+Server hosts supply a `DatabasePort` to ORM and authentication code.
 
 The logging entry point guards the server's global console when imported. Run
 server work inside `runWithLogRedaction({values, databaseURL}, work)`; asynchronous
@@ -222,4 +223,4 @@ Public operations are `auth.send_verification_email({attempt})` and `auth.verify
 
 Mail is dispatched after commit; failures log only `auth_mail_failed` and the mail kind, without changing the response. Pass the existing runtime context so its `waitUntil` owns asynchronous delivery completion. The injected mailer defines the transport; this package has no platform mail dependency. `developmentAuthMailer()` prints fixed authentication messages, including codes and reset links, to the local development console instead of sending email. These messages contain credentials, so use it only in local development.
 
-The runtime shares a three-message hourly budget per normalized address across verification, reset, and existing-account notices, plus 30 messages per caller IP per hour. The host passes the trusted connection IP as the final `invokeAuth` argument; on Cloudflare use the connection IP supplied by the ingress, never a client-controlled `X-Forwarded-For` header. The router reads no IP header. Without a host IP, requests share a fixed local budget.
+The runtime shares a three-message hourly budget per normalized address across verification, reset, and existing-account notices, plus 30 messages per caller IP per hour. The host passes the trusted connection IP as the final `invokeAuth` argument; use the connection IP supplied by trusted ingress, never a client-controlled `X-Forwarded-For` header. The router reads no IP header. Without a host IP, requests share a fixed local budget.

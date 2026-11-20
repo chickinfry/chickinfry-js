@@ -11,6 +11,7 @@
   "files": [
     "dist",
     "!dist/realtime",
+    "!dist/postgres.*",
     "LICENSE",
     "README.md"
   ],
@@ -18,7 +19,6 @@
     ".": "./dist/index.js",
     "./auth": "./dist/auth/index.js",
     "./auth/runtime": "./dist/auth/host.js",
-    "./postgres": "./dist/postgres.js",
     "./logging": "./dist/logging.js"
   },
   "publishConfig": {
@@ -27,15 +27,12 @@
   "scripts": {
     "build": "tsc && node -e \"require('node:fs').copyFileSync('src/realtime/package.json', 'dist/realtime/package.json')\"",
     "prepare": "tsc && node -e \"require('node:fs').copyFileSync('src/realtime/package.json', 'dist/realtime/package.json')\"",
+    "build:internal": "tsc --project internal/database/tsconfig.json",
+    "pretest": "npm run build:internal",
     "test": "esbuild --bundle --platform=node --format=esm --outfile=test/verify-orm.mjs test/verify-orm.ts && node test/verify-orm.mjs && esbuild --bundle --platform=node --format=esm --outfile=test/verify-client.mjs test/verify-client.ts && node test/verify-client.mjs && esbuild --bundle --platform=node --format=esm --outfile=test/verify-refresh.mjs test/verify-refresh.ts && node test/verify-refresh.mjs && esbuild --bundle --platform=node --format=esm --outfile=test/verify-realtime.mjs test/verify-realtime.ts && node test/verify-realtime.mjs && esbuild --bundle --platform=node --format=esm --outfile=test/verify-redirect.mjs test/verify-redirect.ts && node test/verify-redirect.mjs && esbuild --bundle --platform=node --format=esm --outfile=test/verify-opaque-redirect.mjs test/verify-opaque-redirect.ts && node test/verify-opaque-redirect.mjs && esbuild --bundle --platform=node --format=esm --outfile=test/verify-device.mjs test/verify-device.ts && node --test --test-reporter=tap test/verify-device.mjs test/verify-postgres.js test/verify-logging.js test/verify-session-policy.js test/verify-auth-core.js test/verify-auth-crypto.js test/verify-signup-hook.js test/verify-auth-email.js test/verify-auth-runtime.js"
-  },
-  "dependencies": {
-    "pg": "8.23.0",
-    "pg-cloudflare": "1.4.0"
   },
   "devDependencies": {
     "@types/node": "26.6.3",
-    "@types/pg": "8.23.1",
     "esbuild": "0.28.2",
     "typescript": "7.0.2"
   }

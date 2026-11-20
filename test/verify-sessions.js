@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { randomUUID } from "node:crypto";
 import { Auth, AuthError, invokeAuth } from "../dist/auth/index.js";
 import { createDatabase } from "../dist/auth/private/database.js";
-import { createPostgresPort } from "../dist/postgres.js";
+import { createPostgresPort } from "../internal/database/dist/postgres.js";
 import { hashToken, randomToken } from "../dist/auth/crypto.js";
 
 const url = process.env.CHIK_TEST_DATABASE_URL;

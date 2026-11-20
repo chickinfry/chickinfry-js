@@ -20,14 +20,14 @@ class PackAssertionTest(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)
 
-    def pack(self, entries, filename="fixture.tgz", manifest=None):
+    def pack(self, entries, filename="fixture.tgz", manifest=None, contents=None):
         payload = json.dumps({"publishConfig": {"access": "public"}, "exports": {".": "./dist/index.js"}}
                              if manifest is None else manifest).encode()
         with tarfile.open(self.directory / filename, "w:gz") as archive:
             for name, kind in entries:
                 member = tarfile.TarInfo(name)
                 member.type = kind
-                body = payload if kind == tarfile.REGTYPE else b""
+                body = (contents or {}).get(name, payload) if kind == tarfile.REGTYPE else b""
                 member.size = len(body)
                 if kind in (tarfile.SYMTYPE, tarfile.LNKTYPE):
                     member.linkname = "package/package.json"
@@ -96,13 +96,38 @@ class PackAssertionTest(unittest.TestCase):
         for exports in ({}, {
             ".": "./dist/index.js", "./auth": "./dist/auth/index.js",
             "./auth/runtime": "./dist/auth/host.js",
-            "./postgres": "./dist/postgres.js", "./logging": "./dist/logging.js",
+            "./logging": "./dist/logging.js",
         }):
             with self.subTest(exports=exports):
                 self.pack([("package/package.json", tarfile.REGTYPE)],
                           manifest={"publishConfig": {"access": "public"}, "exports": exports})
                 result = self.check_pack()
                 self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_provider_dependencies_and_postgres_export_are_rejected(self):
+        for addition in (
+            {"dependencies": {"pg": "8.23.0"}},
+            {"devDependencies": {"@types/pg": "8.23.1"}},
+            {"optionalDependencies": {"socket": "npm:pg-cloudflare@1.4.0"}},
+            {"exports": {"./postgres": "./dist/postgres.js"}},
+        ):
+            with self.subTest(addition=addition):
+                manifest = {"publishConfig": {"access": "public"}, "exports": {".": "./dist/index.js"}}
+                self.pack([("package/package.json", tarfile.REGTYPE)], manifest=manifest | addition)
+                self.assertNotEqual(self.check_pack().returncode, 0)
+
+    def test_private_database_entries_and_provider_contents_are_rejected(self):
+        for name, body in (
+            ("package/dist/postgres.js", b"export {}"),
+            ("package/dist/postgres.d.ts", b"export {}"),
+            ("package/dist/orm.js", b'import adapter from "pg";'),
+            ("package/dist/auth/host.d.ts", b'import type { Client } from "pg-cloudflare";'),
+            ("package/README.md", b"Use Cloudflare-Workers for the database transport."),
+        ):
+            with self.subTest(name=name):
+                self.pack([("package/package.json", tarfile.REGTYPE), (name, tarfile.REGTYPE)],
+                          contents={name: body})
+                self.assertNotEqual(self.check_pack().returncode, 0)
 
     def test_outside_exports_allowlist(self):
         self.pack([("package/package.json", tarfile.REGTYPE)],

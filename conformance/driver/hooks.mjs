@@ -17,7 +17,7 @@ export function instrument(source) {
   replace('  function gap(cursor: string): void {', `  function gap(cursor: string): void {\n    ${hook}.gap();`);
   replace('        if (frame.previous !== previous || queue.length >= 256) return gap(frame.cursor);', `        if (frame.previous !== previous || queue.length >= 512) {\n          if (queue.length >= 512) ${hook}.overflow();\n          return gap(frame.cursor);\n        }`);
   replace('          recovery = undefined;', `          recovery = undefined;\n          ${hook}.recovered();`);
-  replace('        endpoint = realtimeEndpoint(response.endpoint);', `        endpoint = ${hook}.endpoint(response.endpoint);`);
+  replace('        endpoint = realtimeEndpoint(response.endpoint, domain);', `        endpoint = ${hook}.endpoint(response.endpoint);`);
   // Count an actual stale callback reaching the SDK's existing generation guard.
   replace('      if (!active || socket !== ws) return;\n      const frame', `      if (!active || socket !== ws) { ${hook}.discarded(); return; }\n      const frame`);
   return source;

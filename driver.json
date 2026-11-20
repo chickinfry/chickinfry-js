@@ -10,7 +10,7 @@
   "files": [
     {
       "path": "conformance/driver/hooks.mjs",
-      "sha256": "b1e7eca762d50e62a571bf094c4e9e07ebfcd4c6e6c3aa0c66ab30d4aecc4f57"
+      "sha256": "32797bcb55cafc1ce83e9fce39adf95caba5d6288c456cffe3326ab25484ed7e"
     },
     {
       "path": "conformance/driver/main.mjs",
@@ -18,11 +18,11 @@
     },
     {
       "path": "package-lock.json",
-      "sha256": "61768fd254c4a944091f893ce838873a00f7f9bace35cfca1a2910de6418486c"
+      "sha256": "31b705f003887bd6b3b6ef128d486fcc58ab645c372fe929b06b9ca20df661b9"
     },
     {
       "path": "package.json",
-      "sha256": "4b28ce7923954837106a86b91ef17a0f8111e285d4638c4005a1407cdaa84f50"
+      "sha256": "0e026db6c9646a3cb1c1840eccc2be03f37b31a2d9ce085caaa0d39828924aa2"
     },
     {
       "path": "src/auth/core/crypto.ts",
@@ -34,7 +34,7 @@
     },
     {
       "path": "src/auth/core/flows.ts",
-      "sha256": "e7e1ca9e49d0ceffea11e65035625ff74d20cce609d1b8830d9fd593129f02db"
+      "sha256": "c10c30110b2c8320051f4e48a90362f8366ec44ec8ab0be75168d001bb91f7e2"
     },
     {
       "path": "src/auth/core/rules.ts",
@@ -46,7 +46,7 @@
     },
     {
       "path": "src/auth/core/types.ts",
-      "sha256": "eeb3336c501d0eec24cd823bb146f0eed299fb77f2a4f7afaf9abd87fd8476b3"
+      "sha256": "59ff994340187ba197865b1aa2f1db1fac9a5860f822ba9dad8b8a9691d6b421"
     },
     {
       "path": "src/auth/core/version.ts",
@@ -55,6 +55,10 @@
     {
       "path": "src/auth/crypto.ts",
       "sha256": "acc132fc587b745d67b706e50ee18b0dbda9e9e30ed52288cffcfc10a037e502"
+    },
+    {
+      "path": "src/auth/host.ts",
+      "sha256": "dcbe15da26d7304adac8741cd10ca8be56392b5f5cf34c6c204204258f36cbaa"
     },
     {
       "path": "src/auth/index.ts",
@@ -74,11 +78,23 @@
     },
     {
       "path": "src/auth/runtime.ts",
-      "sha256": "024b543e73eb0c636016a90dfb09736ee4432357bf3ad61dc8bdefd781fe8719"
+      "sha256": "8587b91f92bfa04719c45bd467b2aa64d5ce9696bd3c607d85222abf73ac5a82"
+    },
+    {
+      "path": "src/auth/signup-rate-limit.ts",
+      "sha256": "d598c64e7968befae519097db2c597f1b7c35a798d15dce934a66adebf09d639"
     },
     {
       "path": "src/auth/store.ts",
-      "sha256": "ff12943277a51cadeaa46dadf6adac1415d4606e72b77a46f6acc628da2b8169"
+      "sha256": "ccde7d2063ccebd7a43a777c38b3a2ed6544097d07f46e9f1cc7bc35130d9709"
+    },
+    {
+      "path": "src/auth/transaction.ts",
+      "sha256": "06e047b776e0c44692b7c95c46ef7b46cdf5ba6f4ab4d11d6dbe638d4943e45c"
+    },
+    {
+      "path": "src/database-budget.ts",
+      "sha256": "e3b3d061295626036a62a071dc17c9d9ef4e1f123c099acf1b05b1ef53187684"
     },
     {
       "path": "src/device-node.ts",
@@ -105,12 +121,8 @@
       "sha256": "e70c69dfa763035495e02f6420bdd1b90c761209852a6318b51d16071b6b6f93"
     },
     {
-      "path": "src/postgres.ts",
-      "sha256": "0258b841865da172a27a16775bfd568ed763dd9837cac98f528c575a0c0abad9"
-    },
-    {
       "path": "src/realtime/client.ts",
-      "sha256": "6aa9a867de8fe9bc3209d9e3a2e5288f6b0700cff8aace7aece59259db2b9dba"
+      "sha256": "ca5745c682cc16b594f844fe1616277597a1c0e4bf3e683b03a489143a6c410d"
     },
     {
       "path": "src/realtime/package.json",

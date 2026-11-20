@@ -1,4 +1,4 @@
-import { cleanupBudgetMillis } from "../postgres.js";
+import { cleanupBudgetMillis } from "../database-budget.js";
 import { and, or, createDatabase, appAuthSessionsTable, type Database, type DatabasePort } from "./private/database.js";
 import { encodeTimestampValue } from "../orm.js";
 import { cleanupCandidates as candidates, emailPolicy, type CleanupCondition } from "./core/rules.js";

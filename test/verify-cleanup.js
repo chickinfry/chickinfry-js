@@ -5,7 +5,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { Auth, AuthError } from "../dist/auth/runtime.js";
 import { hashToken } from "../dist/auth/crypto.js";
 import { createDatabase } from "../dist/auth/private/database.js";
-import { createPostgresPort, cleanupBudgetMillis } from "../dist/postgres.js";
+import { createPostgresPort, cleanupBudgetMillis } from "../internal/database/dist/postgres.js";
 
 const url = process.env.CHIK_TEST_DATABASE_URL;
 const port = createPostgresPort(url), other = createPostgresPort(url);

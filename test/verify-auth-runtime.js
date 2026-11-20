@@ -3,9 +3,11 @@ import test from "node:test";
 import { Auth, AuthError } from "@chickinfry/chickinfry/auth";
 import { randomBytes, randomUUID } from "node:crypto";
 import { defineTable, Repository } from "@chickinfry/chickinfry";
-import pg from "pg";
-import { createPostgresPort } from "@chickinfry/chickinfry/postgres";
+import { createRequire } from "node:module";
+import { createPostgresPort } from "../internal/database/dist/postgres.js";
 import { createDatabase } from "../dist/auth/private/database.js";
+
+const pg = createRequire(new URL("../internal/database/package.json", import.meta.url))("pg");
 
 const runtime = () => import("@chickinfry/chickinfry/auth/runtime");
 const noIO = {query() { throw new Error("Unexpected I/O"); }, transaction() { throw new Error("Unexpected I/O"); }};
