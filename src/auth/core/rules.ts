@@ -33,10 +33,9 @@ export const devicePolicy = Object.freeze({
   slowDownMillis: 5_000,
   attemptWindowMillis: 10 * 60_000,
   attemptMaximum: 10,
-  // Hosts without a trusted client address cannot separate callers, so one shared
-  // budget must not block ordinary sign-ins; the ~39.6-bit code and 10-minute
-  // lifetime remain the brute-force bound.
-  sharedAttemptMaximum: 600,
+  // Hosts without a trusted client address cannot separate callers starting a
+  // request, so that shared start budget must stay above ordinary sign-in volume.
+  sharedStartMaximum: 600,
   startWindowMillis: 10 * 60_000,
   startMaximum: 10,
   maximumDeviceNameLength: 64,

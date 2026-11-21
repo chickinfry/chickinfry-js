@@ -281,7 +281,7 @@ export class Flows {
   async startDevice(input: {deviceName?: unknown}, callerIp?: string): Promise<DeviceAuthorization> {
     const name = deviceName(input.deviceName);
     await this.rateLimit("device_start", callerIp ? "ip:" + callerIp : "shared",
-      callerIp ? devicePolicy.startMaximum : devicePolicy.sharedAttemptMaximum, devicePolicy.startWindowMillis);
+      callerIp ? devicePolicy.startMaximum : devicePolicy.sharedStartMaximum, devicePolicy.startWindowMillis);
     const deviceCode = randomToken();
     let userCode: string;
     do {
@@ -303,14 +303,21 @@ export class Flows {
 
   // The approval page shows what the terminal asked for before the person approves.
   async describeDevice(code: string, callerIp?: string): Promise<DeviceDetails> {
-    const candidate = await this.lookupDevice(code, callerIp);
+    const candidate = await this.lookupDevice(code, callerIp, undefined);
     return {deviceName: candidate.deviceName, createdAt: candidate.createdAt, expiresAt: candidate.expiresAt};
   }
 
-  private async lookupDevice(code: string, callerIp?: string): Promise<AppAuthDeviceRequestsRow> {
-    await this.rateLimit("device_code", callerIp ? "ip:" + callerIp : "shared",
-      callerIp ? devicePolicy.attemptMaximum : devicePolicy.sharedAttemptMaximum, devicePolicy.attemptWindowMillis);
-    const candidate = await this.db.deviceRequestByUserCodeHash(hashToken(normalizeUserCode(code)));
+  // A budget shared by every caller would let anonymous requests block all approvals,
+  // so attempts count per approving user and, when the host knows it, per client address.
+  private async lookupDevice(code: string, callerIp: string | undefined, userId: string | undefined): Promise<AppAuthDeviceRequestsRow> {
+    const userCodeHash = hashToken(normalizeUserCode(code));
+    if (userId !== undefined) {
+      await this.rateLimit("device_code_user", userId, devicePolicy.attemptMaximum, devicePolicy.attemptWindowMillis);
+    }
+    if (callerIp) {
+      await this.rateLimit("device_code", "ip:" + callerIp, devicePolicy.attemptMaximum, devicePolicy.attemptWindowMillis);
+    }
+    const candidate = await this.db.deviceRequestByUserCodeHash(userCodeHash);
     if (!candidate) throw new AuthError("device_code_invalid", 400);
     if (Date.parse(candidate.expiresAt) <= this.now()) throw new AuthError("expired_token", 400);
     if (candidate.status !== "pending") throw new AuthError("device_code_used", 400);
@@ -326,7 +333,7 @@ export class Flows {
   }
 
   private async decideDevice(user: {id: string}, code: string, status: "approved" | "denied", callerIp?: string): Promise<DeviceApproval> {
-    const candidate = await this.lookupDevice(code, callerIp);
+    const candidate = await this.lookupDevice(code, callerIp, user.id);
     const now = this.timestamp();
     const values = status === "approved"
       ? {status, userId: user.id, approvedAt: now}

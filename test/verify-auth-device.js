@@ -45,19 +45,48 @@ test("device approval issues one session only after browser approval", {skip: !u
   await rejected(auth.approveDeviceAuthorization({id: user.userId}, started.userCode, callerId()), "device_code_used", 400);
 });
 
-test("a host without a trusted client address does not share one ten-attempt budget", {skip: !url, timeout: 120000}, async t => {
+test("anonymous code guesses without a client address cannot block other users' approvals", {skip: !url, timeout: 120000}, async t => {
+  const {createPostgresPort} = await import("../internal/database/dist/postgres.js");
+  const port = createPostgresPort(url);
+  t.after(async () => { await port.close(); });
+  const auth = new Auth(port, [], Date.now, {}, {deviceVerificationBase: "https://app.example.test"});
+  const attacker = await auth.signup(randomUUID() + "@example.test", password);
+  const victim = await auth.signup(randomUUID() + "@example.test", password);
+  // The platform host does not pass callerIp. More wrong lookups than any shared
+  // budget allowed must not reach the people approving their own devices.
+  const wrong = () => randomUUID().replace(/[^A-HJ-NP-Z2-9]/gi, "").toUpperCase().padEnd(8, "A").slice(0, 8);
+  for (let attempt = 0; attempt < 610; attempt++) {
+    await assert.rejects(auth.describeDeviceAuthorization(wrong()), error => error instanceof AuthError && error.status === 400);
+  }
+  for (let attempt = 0; attempt < 10; attempt++) {
+    await rejected(auth.approveDeviceAuthorization({id: attacker.userId}, "AAAA-AAAA"), "device_code_invalid", 400);
+  }
+  // The approving account carries its own guessing budget.
+  await rejected(auth.approveDeviceAuthorization({id: attacker.userId}, "AAAA-AAAA"), "rate_limited", 429);
+
+  const started = await auth.startDeviceAuthorization({deviceName: "victim-laptop"});
+  const details = await auth.describeDeviceAuthorization(started.userCode);
+  assert.equal(details.deviceName, "victim-laptop");
+  await auth.approveDeviceAuthorization({id: victim.userId}, started.userCode);
+  const tokens = await auth.pollDeviceAuthorization(started.deviceCode);
+  assert.equal(tokens.userId, victim.userId);
+});
+
+test("malformed device codes are refused before they spend the caller budget", {skip: !url, timeout: 120000}, async t => {
   const {createPostgresPort} = await import("../internal/database/dist/postgres.js");
   const port = createPostgresPort(url);
   t.after(async () => { await port.close(); });
   const auth = new Auth(port, [], Date.now, {}, {deviceVerificationBase: "https://app.example.test"});
   const user = await auth.signup(randomUUID() + "@example.test", password);
-  // The platform host does not pass callerIp; ordinary sign-ins must keep working.
+  const caller = callerId();
   for (let attempt = 0; attempt < 12; attempt++) {
-    const started = await auth.startDeviceAuthorization({});
-    await auth.approveDeviceAuthorization({id: user.userId}, started.userCode);
-    const tokens = await auth.pollDeviceAuthorization(started.deviceCode);
-    assert.equal(tokens.userId, user.userId);
+    await rejected(auth.describeDeviceAuthorization("not a code", caller), "invalid_input", 400);
+    await rejected(auth.approveDeviceAuthorization({id: user.userId}, "0000-0000", caller), "invalid_input", 400);
   }
+  const started = await auth.startDeviceAuthorization({}, caller);
+  await auth.describeDeviceAuthorization(started.userCode, caller);
+  const approved = await auth.approveDeviceAuthorization({id: user.userId}, started.userCode, caller);
+  assert.equal(approved.status, "approved");
 });
 
 test("expired device requests are removed by the bounded cleanup pass", {skip: !url, timeout: 120000}, async t => {
@@ -71,13 +100,18 @@ test("expired device requests are removed by the bounded cleanup pass", {skip: !
   const auth = new Auth(port, [], () => clock, {}, {deviceVerificationBase: "https://app.example.test"}, context);
   const user = await auth.signup(randomUUID() + "@example.test", password);
   const started = await auth.startDeviceAuthorization({}, callerId());
+  // Signup and start already scheduled cleanup passes; finish them before the row
+  // expires so the refusal below cannot race a deletion.
+  await Promise.all(tasks.splice(0));
   const {hashToken} = await import("../dist/auth/core/crypto.js");
   const db = createDatabase(port);
   const row = await db.appAuthDeviceRequests.findById({id: (await db.appAuthDeviceRequests.findMany({
     where: c => c.deviceCodeHash.eq(hashToken(started.deviceCode)), limit: 1,
   }))[0].id});
   assert.equal(row.status, "pending");
-  await db.appAuthDeviceRequests.update({id: row.id}, {expiresAt: new Date(clock - 60000).toISOString()});
+  // Cleanup removes the oldest expired rows first, a page at a time; an expiry older
+  // than anything earlier runs left keeps this row on the first page.
+  await db.appAuthDeviceRequests.update({id: row.id}, {expiresAt: "2000-01-01T00:00:00.000Z"});
   console.error = message => logs.push(message);
   try {
     await auth.approveDeviceAuthorization({id: user.userId}, started.userCode, callerId());
@@ -87,12 +121,12 @@ test("expired device requests are removed by the bounded cleanup pass", {skip: !
   // An expired request must be gone, not merely refused.
   await rejected(auth.pollDeviceAuthorization(started.deviceCode), "expired_token", 400);
   clock += 60000;
-  // Cleanup runs as a background promise collected by the fake host context;
-  // without awaiting it the assertion races the deletion.
+  // Starting another request schedules the next cleanup pass on the fake host context.
+  await auth.startDeviceAuthorization({}, callerId());
+  assert.ok(tasks.length > 0);
   await Promise.all(tasks);
   const cleaned = createDatabase(port);
-  const remaining = (await cleaned.appAuthDeviceRequests.findMany({limit: 50}))
-    .filter(candidate => candidate.id === row.id);
+  const remaining = await cleaned.appAuthDeviceRequests.findMany({where: c => c.id.eq(row.id), limit: 1});
   assert.deepEqual(remaining, []);
 });
 
