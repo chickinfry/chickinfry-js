@@ -1,0 +1,128 @@
+{
+  "name": "Publish",
+  "on": {
+    "push": {
+      "tags": [
+        "v*"
+      ]
+    }
+  },
+  "permissions": {
+    "contents": "read",
+    "id-token": "write"
+  },
+  "jobs": {
+    "build": {
+      "if": "github.repository == 'chickinfry/chickinfry-js'",
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 15,
+      "permissions": {
+        "contents": "read"
+      },
+      "steps": [
+        {
+          "name": "Read the scanned tarball digest from the release tag",
+          "env": {
+            "GH_TOKEN": "${{ github.token }}"
+          },
+          "shell": "bash",
+          "run": "/usr/bin/env -i GH_TOKEN=\"$GH_TOKEN\" GITHUB_REPOSITORY=\"$GITHUB_REPOSITORY\" GITHUB_SHA=\"$GITHUB_SHA\" GITHUB_REF=\"$GITHUB_REF\" GITHUB_EVENT_NAME=\"$GITHUB_EVENT_NAME\" RUNNER_TEMP=\"$RUNNER_TEMP\" /usr/bin/python3 -I -B - <<'TRUST'\nimport json\nimport os\nimport re\nimport sys\nimport urllib.request\n\n\nclass NoRedirect(urllib.request.HTTPRedirectHandler):\n    def redirect_request(self, req, fp, code, msg, headers, newurl):\n        return None\n\n\ndef expected_digest():\n    repository = os.environ['GITHUB_REPOSITORY']\n    sha = os.environ['GITHUB_SHA']\n    ref = os.environ['GITHUB_REF']\n    if repository != 'chickinfry/chickinfry-js' or not re.fullmatch(r'[0-9a-f]{40}', sha):\n        raise ValueError('Invalid release source.')\n    if os.environ['GITHUB_EVENT_NAME'] != 'push' or not re.fullmatch(r'refs/tags/v(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)', ref):\n        raise ValueError('Release source must be a version tag push.')\n    token = os.environ.pop('GH_TOKEN')\n    opener = urllib.request.build_opener(NoRedirect)\n\n    def api(path):\n        request = urllib.request.Request('https://api.github.com/repos/' + repository + '/' + path,\n                                        headers={'Authorization': 'Bearer ' + token,\n                                                 'Accept': 'application/vnd.github+json',\n                                                 'X-GitHub-Api-Version': '2022-11-28'})\n        with opener.open(request, timeout=30) as response:\n            return json.load(response)\n\n    if api('compare/main...' + sha)['status'] != 'identical':\n        raise ValueError('Release source must be the current main HEAD.')\n    target = api('git/ref/' + ref[len('refs/'):])['object']\n    if target['type'] != 'tag':\n        raise ValueError('Release tag must be an annotated tag.')\n    tag = api('git/tags/' + target['sha'])\n    if tag['object']['type'] != 'commit' or tag['object']['sha'] != sha or tag['tag'] != ref[len('refs/tags/'):]:\n        raise ValueError('Release tag does not point at the release source.')\n    digests = re.findall(r'(?m)^npm-tarball-sha256: ([0-9a-f]{64})$', tag['message'])\n    if len(digests) != 1:\n        raise ValueError('Release tag must carry exactly one tarball digest.')\n    return digests[0]\n\n\ntry:\n    digest = expected_digest()\nexcept Exception:\n    print('Release tag verification failed.', file=sys.stderr)\n    sys.exit(1)\nwith open(os.path.join(os.environ['RUNNER_TEMP'], 'expected.sha256'), 'x') as target:\n    target.write(digest + '\\n')\nprint('Expected tarball digest: ' + digest)\nTRUST\n"
+        },
+        {
+          "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+          "with": {
+            "persist-credentials": false
+          }
+        },
+        {
+          "uses": "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+          "with": {
+            "node-version": "24.21.0"
+          }
+        },
+        {
+          "name": "Install pinned npm with trusted publishing support",
+          "run": "npm install --global npm@11.19.1"
+        },
+        {
+          "run": "npm ci"
+        },
+        {
+          "run": "npm run build"
+        },
+        {
+          "run": "npm test"
+        },
+        {
+          "name": "Verify release tag matches package version",
+          "shell": "bash",
+          "run": "set -euo pipefail\nversion=$(node -p 'require(\"./package.json\").version')\n[ \"$GITHUB_REF_NAME\" = \"v$version\" ] || { echo 'Release tag must match package.json version.' >&2; exit 1; }\n"
+        },
+        {
+          "name": "Pack and require the scanned digest",
+          "shell": "bash",
+          "run": "set -euo pipefail\nmkdir \"$RUNNER_TEMP/pack\"\nnpm pack --ignore-scripts --pack-destination \"$RUNNER_TEMP/pack\"\nset -- \"$RUNNER_TEMP\"/pack/*.tgz\n[ \"$#\" -eq 1 ] && [ -f \"$1\" ] && [ ! -L \"$1\" ] || { echo 'Expected exactly one tarball.' >&2; exit 1; }\nactual=$(sha256sum \"$1\" | cut -d ' ' -f 1)\nexpected=$(cat \"$RUNNER_TEMP/expected.sha256\")\nif [ \"$actual\" != \"$expected\" ]; then\n  echo \"Rebuilt tarball $actual does not match the scanned digest $expected.\" >&2\n  exit 1\nfi\necho \"Rebuilt tarball matches the scanned digest $actual\" | tee -a \"$GITHUB_STEP_SUMMARY\"\n"
+        },
+        {
+          "name": "Upload the matching tarball",
+          "uses": "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+          "with": {
+            "name": "npm-release-tarball",
+            "path": "${{ runner.temp }}/pack/*.tgz",
+            "if-no-files-found": "error",
+            "retention-days": 1,
+            "compression-level": 0
+          }
+        }
+      ]
+    },
+    "publish": {
+      "needs": "build",
+      "if": "github.repository == 'chickinfry/chickinfry-js'",
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 15,
+      "permissions": {
+        "contents": "read",
+        "id-token": "write"
+      },
+      "steps": [
+        {
+          "name": "Read the scanned tarball digest from the release tag",
+          "env": {
+            "GH_TOKEN": "${{ github.token }}"
+          },
+          "shell": "bash",
+          "run": "/usr/bin/env -i GH_TOKEN=\"$GH_TOKEN\" GITHUB_REPOSITORY=\"$GITHUB_REPOSITORY\" GITHUB_SHA=\"$GITHUB_SHA\" GITHUB_REF=\"$GITHUB_REF\" GITHUB_EVENT_NAME=\"$GITHUB_EVENT_NAME\" RUNNER_TEMP=\"$RUNNER_TEMP\" /usr/bin/python3 -I -B - <<'TRUST'\nimport json\nimport os\nimport re\nimport sys\nimport urllib.request\n\n\nclass NoRedirect(urllib.request.HTTPRedirectHandler):\n    def redirect_request(self, req, fp, code, msg, headers, newurl):\n        return None\n\n\ndef expected_digest():\n    repository = os.environ['GITHUB_REPOSITORY']\n    sha = os.environ['GITHUB_SHA']\n    ref = os.environ['GITHUB_REF']\n    if repository != 'chickinfry/chickinfry-js' or not re.fullmatch(r'[0-9a-f]{40}', sha):\n        raise ValueError('Invalid release source.')\n    if os.environ['GITHUB_EVENT_NAME'] != 'push' or not re.fullmatch(r'refs/tags/v(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)', ref):\n        raise ValueError('Release source must be a version tag push.')\n    token = os.environ.pop('GH_TOKEN')\n    opener = urllib.request.build_opener(NoRedirect)\n\n    def api(path):\n        request = urllib.request.Request('https://api.github.com/repos/' + repository + '/' + path,\n                                        headers={'Authorization': 'Bearer ' + token,\n                                                 'Accept': 'application/vnd.github+json',\n                                                 'X-GitHub-Api-Version': '2022-11-28'})\n        with opener.open(request, timeout=30) as response:\n            return json.load(response)\n\n    if api('compare/main...' + sha)['status'] != 'identical':\n        raise ValueError('Release source must be the current main HEAD.')\n    target = api('git/ref/' + ref[len('refs/'):])['object']\n    if target['type'] != 'tag':\n        raise ValueError('Release tag must be an annotated tag.')\n    tag = api('git/tags/' + target['sha'])\n    if tag['object']['type'] != 'commit' or tag['object']['sha'] != sha or tag['tag'] != ref[len('refs/tags/'):]:\n        raise ValueError('Release tag does not point at the release source.')\n    digests = re.findall(r'(?m)^npm-tarball-sha256: ([0-9a-f]{64})$', tag['message'])\n    if len(digests) != 1:\n        raise ValueError('Release tag must carry exactly one tarball digest.')\n    return digests[0]\n\n\ntry:\n    digest = expected_digest()\nexcept Exception:\n    print('Release tag verification failed.', file=sys.stderr)\n    sys.exit(1)\nwith open(os.path.join(os.environ['RUNNER_TEMP'], 'expected.sha256'), 'x') as target:\n    target.write(digest + '\\n')\nprint('Expected tarball digest: ' + digest)\nTRUST\n"
+        },
+        {
+          "name": "Download the matching tarball",
+          "uses": "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+          "with": {
+            "name": "npm-release-tarball",
+            "path": "${{ runner.temp }}/pack"
+          }
+        },
+        {
+          "uses": "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+          "with": {
+            "node-version": "24.21.0"
+          }
+        },
+        {
+          "name": "Install pinned npm with trusted publishing support",
+          "run": "npm install --global npm@11.19.1"
+        },
+        {
+          "name": "Publish only the scanned bytes with trusted publishing",
+          "shell": "bash",
+          "run": "set -euo pipefail\nset -- \"$RUNNER_TEMP\"/pack/*.tgz\n[ \"$#\" -eq 1 ] && [ -f \"$1\" ] && [ ! -L \"$1\" ] || { echo 'Expected exactly one tarball.' >&2; exit 1; }\nprintf '%s  %s\\n' \"$(cat \"$RUNNER_TEMP/expected.sha256\")\" \"$1\" | sha256sum --check --strict\n# --provenance makes npm refuse the upload itself unless this repository is\n# public, so an unattested release stops before the registry accepts it.\nnpm publish \"$1\" --ignore-scripts --provenance --registry=https://registry.npmjs.org/\necho \"TARBALL=$1\" >> \"$GITHUB_ENV\"\n"
+        },
+        {
+          "name": "Verify the published version carries its provenance",
+          "shell": "bash",
+          "run": "set -euo pipefail\n# npm only attaches provenance when the publishing repository is public.\n# A private repository publishes without it, which breaks the release\n# gate that every runtime must carry source attestation.\npython3 -I -B - \"$TARBALL\" <<'PY'\nimport json\nimport sys\nimport tarfile\nimport time\nimport urllib.error\nimport urllib.request\n\nwith tarfile.open(sys.argv[1], mode=\"r:gz\") as archive:\n    manifest = json.loads(archive.extractfile(\"package/package.json\").read())\nname, version = manifest[\"name\"], manifest[\"version\"]\nurl = \"https://registry.npmjs.org/%s/%s\" % (name.replace(\"/\", \"%2f\"), version)\ndeadline = time.monotonic() + 600\nwhile True:\n    try:\n        with urllib.request.urlopen(url, timeout=30) as response:\n            published = json.load(response)\n    except urllib.error.HTTPError as error:\n        if error.code != 404 or time.monotonic() > deadline:\n            raise\n        time.sleep(15)\n        continue\n    break\nattestations = published.get(\"dist\", {}).get(\"attestations\")\nif not isinstance(attestations, dict) or not attestations.get(\"url\"):\n    raise SystemExit(\n        \"%s@%s was published without provenance attestations. npm only attaches them \"\n        \"when the publishing repository is public.\" % (name, version))\nprint(\"provenance verified: %s@%s %s\" % (name, version, attestations[\"url\"]))\nPY\n"
+        }
+      ]
+    }
+  }
+}

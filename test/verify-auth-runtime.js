@@ -4,10 +4,8 @@ import { Auth, AuthError } from "@chickinfry/chickinfry/auth";
 import { randomBytes, randomUUID } from "node:crypto";
 import { defineTable, Repository } from "@chickinfry/chickinfry";
 import { createRequire } from "node:module";
-import { createPostgresPort } from "../internal/database/dist/postgres.js";
 import { createDatabase } from "../dist/auth/private/database.js";
 
-const pg = createRequire(new URL("../internal/database/package.json", import.meta.url))("pg");
 
 const runtime = () => import("@chickinfry/chickinfry/auth/runtime");
 const noIO = {query() { throw new Error("Unexpected I/O"); }, transaction() { throw new Error("Unexpected I/O"); }};
@@ -116,6 +114,9 @@ const url = process.env.CHIK_TEST_RUNTIME_DATABASE_URL ?? process.env.CHIK_TEST_
 
 test("host leases preserve PostgreSQL authentication, email, cleanup, and signup atomicity", {skip: !url}, async t => {
   const {createHostPort, invokeRuntime} = await runtime();
+  // The database adapter is internal, so the public mirror never loads it.
+  const {createPostgresPort} = await import("../internal/database/dist/postgres.js");
+  const pg = createRequire(new URL("../internal/database/package.json", import.meta.url))("pg");
   const tableName = `auth_hook_${randomUUID().replaceAll("-", "")}`;
   const hookTable = defineTable({name: tableName, primaryKey: ["id"], columns: {id: "id"}});
   const admin = createPostgresPort(url);

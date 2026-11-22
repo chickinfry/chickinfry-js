@@ -6,7 +6,7 @@ import { AuthError } from "./errors.js";
 import type { Store, AppAuthUsersRow, AppAuthInvitesRow, AppAuthSessionsRow, AppAuthRefreshTokensRow, AppAuthRateLimitsRow, AppAuthSignupRequestsRow,
   AppAuthDeviceRequestsRow } from "./store.js";
 import type { Tokens, BrowserSession, IdentityProvider, AuthUser, AuthOptions, SessionTransport, InviteSummary, AuthActor, ActionTokenKind,
-  SignupRateLimitOptions, DeviceAuthorization, DeviceApproval, DeviceDetails } from "./types.js";
+  SignupRateLimitOptions, AbuseLimitOptions, DeviceAuthorization, DeviceApproval, DeviceDetails } from "./types.js";
 
 const day = 24 * 60 * 60_000;
 
@@ -15,7 +15,8 @@ export class Flows {
   readonly policy: Required<SessionPolicy>;
 
   constructor(private readonly db: Store, providers: readonly IdentityProvider[], private readonly now: () => number,
-    private readonly options: AuthOptions, private readonly signupRateLimit: Required<SignupRateLimitOptions>) {
+    private readonly options: AuthOptions, private readonly signupRateLimit: Required<SignupRateLimitOptions>,
+    private readonly abuseLimits: Required<AbuseLimitOptions>) {
     if (options.signup !== undefined && options.signup !== "open" && options.signup !== "invite-only") {
       throw new Error("Invalid signup policy.");
     }
@@ -86,7 +87,7 @@ export class Flows {
       if (Date.parse(row.expiresAt) <= this.now()) await tx.deleteSignup(row.id);
       else active.push(row);
     }
-    if (active.length >= signupPolicy.maximumActiveRequests) return undefined;
+    if (active.length >= this.abuseLimits.pendingSignupMax) return undefined;
     const token = await this.newCode(tx, input.email, ...active.map(row => row.codeHash)), at = this.timestamp();
     await tx.saveSignup({id: input.attempt, email: input.email, passwordHash: input.passwordHash, codeHash: hashCode(input.email, token),
       codeExpiresAt: actionTokenExpiry("email_verification", this.now()), inviteId: input.inviteId,
@@ -230,9 +231,10 @@ export class Flows {
 
   private async allowMail(email: string, callerIp?: string): Promise<boolean> {
     const keys = mailRateKeys(email, callerIp);
+    const {mailIpMax, mailAddressMax, mailWindowSeconds} = this.abuseLimits;
     try {
-      if (keys.ip) await this.rateLimit("auth_mail_ip", keys.ip, emailPolicy.ipMaximum, emailPolicy.rateWindowMillis);
-      await this.rateLimit("auth_mail_address", keys.address, emailPolicy.addressMaximum, emailPolicy.rateWindowMillis);
+      if (keys.ip) await this.rateLimit("auth_mail_ip", keys.ip, mailIpMax, mailWindowSeconds * 1_000);
+      await this.rateLimit("auth_mail_address", keys.address, mailAddressMax, mailWindowSeconds * 1_000);
       return true;
     } catch (error) {
       if (error instanceof AuthError && error.code === "rate_limited") return false;
@@ -252,7 +254,7 @@ export class Flows {
     if (typeof identity.subject !== "string" || identity.subject.length === 0 || identity.subject.length > 2048) {
       throw new AuthError("invalid_credentials", 401);
     }
-    await this.rateLimit("identity", providerID + ":" + identity.subject);
+    await this.rateLimitIdentity(providerID, identity.subject);
     if (this.options.signup === "invite-only" &&
         !await this.db.identity(providerID, identity.subject)) {
       await this.rateLimitSignup(email);
@@ -583,7 +585,13 @@ export class Flows {
     if (signal !== "off") await this.rateLimit("signup", signal === "email" ? email : "signup:global", max, windowSeconds * 1_000);
   }
 
-  private async rateLimit(action: string, value: string, maximum = 10, windowMillis = 15 * 60_000): Promise<void> {
+  private async rateLimitIdentity(providerID: string, subject: string): Promise<void> {
+    const {defaultMax, defaultWindowSeconds} = this.abuseLimits;
+    await this.rateLimit("identity", `${providerID}:${subject}`, defaultMax, defaultWindowSeconds * 1_000);
+  }
+
+  private async rateLimit(action: string, value: string, maximum = this.abuseLimits.defaultMax,
+    windowMillis = this.abuseLimits.defaultWindowSeconds * 1_000): Promise<void> {
     const key = {action, keyHash: hashToken(value)};
     for (let attempt = 0; attempt < 4; attempt++) {
       const row = await this.db.rateLimit(key);

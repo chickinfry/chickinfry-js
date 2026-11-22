@@ -24,6 +24,23 @@ test("signup rate limit rejects invalid declaration and environment values befor
   invalid({lookupEnv: () => { throw new Error("fixture-invalid"); }}, "AUTH_RATE_LIMITS_SIGNUP_SIGNAL");
 });
 
+test("abuse limits reject invalid declarations and environment values before I/O", () => {
+  const invalid = (options, field) => assert.throws(() => new Auth(noIO, [], Date.now, {}, options), error => {
+    assert.ok(error.message.includes(field));
+    assert.ok(!error.message.includes("fixture-invalid"));
+    return true;
+  });
+  invalid({abuseLimits: {unknownLimit: 1}}, "auth.abuse_limits");
+  invalid({abuseLimits: {mailAddressMax: 0}}, "auth.abuse_limits.mailAddressMax");
+  invalid({abuseLimits: {pendingSignupMax: 1.5}}, "auth.abuse_limits.pendingSignupMax");
+  invalid({abuseLimits: {defaultWindowSeconds: 2 ** 31}}, "auth.abuse_limits.defaultWindowSeconds");
+  const name = "AUTH_RATE_LIMITS_MAIL_IP_MAX";
+  for (const value of ["", "0", " 2", "1e2", "fixture-invalid"]) {
+    invalid({lookupEnv: key => key === name ? value : undefined}, name);
+  }
+  new Auth(noIO, [], Date.now, {}, {abuseLimits: {mailAddressMax: 1}, lookupEnv: key => key === name ? "7" : undefined});
+});
+
 test("verified email requires an injected mailer and a safe client link base at startup", () => {
   assert.throws(() => new Auth(noIO, [], Date.now, {}, {email: {verification: "required"}}), /mailer/i);
   const mailer = {async send() {}};

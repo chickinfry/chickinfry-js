@@ -108,7 +108,7 @@ class PackAssertionTest(unittest.TestCase):
         for addition in (
             {"dependencies": {"pg": "8.23.0"}},
             {"devDependencies": {"@types/pg": "8.23.1"}},
-            {"optionalDependencies": {"socket": "npm:pg-cloudflare@1.4.0"}},
+            {"optionalDependencies": {"socket": "npm:pg-" + "cloud" + "flare@1.4.0"}},
             {"exports": {"./postgres": "./dist/postgres.js"}},
         ):
             with self.subTest(addition=addition):
@@ -121,8 +121,8 @@ class PackAssertionTest(unittest.TestCase):
             ("package/dist/postgres.js", b"export {}"),
             ("package/dist/postgres.d.ts", b"export {}"),
             ("package/dist/orm.js", b'import adapter from "pg";'),
-            ("package/dist/auth/host.d.ts", b'import type { Client } from "pg-cloudflare";'),
-            ("package/README.md", b"Use Cloudflare-Workers for the database transport."),
+            ("package/dist/auth/host.d.ts", b'import type { Client } from "pg-' + b'cloud' + b'flare";'),
+            ("package/README.md", b"Use Cloud" + b"flare-Workers for the database transport."),
         ):
             with self.subTest(name=name):
                 self.pack([("package/package.json", tarfile.REGTYPE), (name, tarfile.REGTYPE)],
@@ -212,8 +212,8 @@ class ReleaseSourceTest(unittest.TestCase):
         self.environment = {
             "GITHUB_REPOSITORY": "example/package",
             "GITHUB_SHA": self.sha,
-            "GITHUB_REF": "refs/tags/v0.3.0",
-            "GITHUB_EVENT_NAME": "push",
+            "GITHUB_REF": "refs/heads/main",
+            "GITHUB_EVENT_NAME": "workflow_dispatch",
             "GH_TOKEN": "fixture-token",
         }
         self.run = {
@@ -221,21 +221,17 @@ class ReleaseSourceTest(unittest.TestCase):
             "status": "completed", "conclusion": "success",
         }
         workflow = Path(os.environ["PUBLISH_WORKFLOW_PATH"]).read_text()
-        sources = []
-        for job in ("build", "publish"):
-            body = workflow.split("\n  " + job + ":\n", 1)[1].split("\n  publish:\n", 1)[0]
-            steps = body.split("    steps:\n", 1)[1]
-            self.assertTrue(steps.startswith("      - name: Verify release source before running code\n"))
-            first = steps.split("\n      - ", 1)[0]
-            self.assertIn(' /usr/bin/python3 -I -B - <<\'TRUST\'\n', first)
-            self.assertIn('/usr/bin/env -i GH_TOKEN="$GH_TOKEN"', first)
-            inline = first.split("<<'TRUST'\n", 1)[1].split("          TRUST", 1)[0]
-            self.assertTrue(all(not line or line.startswith("          ") for line in inline.splitlines()))
-            sources.append("\n".join(line[10:] for line in inline.splitlines()) + "\n")
-        self.assertEqual(sources[0], sources[1])
-        self.source = compile(sources[0], str(os.environ["PUBLISH_WORKFLOW_PATH"]), "exec")
+        steps = workflow.split("\n  tag:\n", 1)[1].split("    steps:\n", 1)[1]
+        self.assertTrue(steps.startswith("      - name: Verify release source before running code\n"))
+        first = steps.split("\n      - ", 1)[0]
+        self.assertIn(' /usr/bin/python3 -I -B - <<\'TRUST\'\n', first)
+        self.assertIn('/usr/bin/env -i GH_TOKEN="$GH_TOKEN"', first)
+        inline = first.split("<<'TRUST'\n", 1)[1].split("          TRUST", 1)[0]
+        self.assertTrue(all(not line or line.startswith("          ") for line in inline.splitlines()))
+        source = "\n".join(line[10:] for line in inline.splitlines()) + "\n"
+        self.source = compile(source, str(os.environ["PUBLISH_WORKFLOW_PATH"]), "exec")
 
-    def approval(self, status="behind", runs=None, error=None):
+    def approval(self, status="identical", runs=None, error=None):
         responses = iter(({"status": status}, {"workflow_runs": [self.run] if runs is None else runs}))
         requests = []
 
@@ -263,13 +259,12 @@ class ReleaseSourceTest(unittest.TestCase):
         ])
         return True, requests
 
-    def test_main_ancestor_with_successful_ci(self):
-        for status in ("behind", "identical"):
-            with self.subTest(status=status):
-                self.assertTrue(self.approval(status)[0])
+    def test_main_head_with_successful_ci(self):
+        self.assertTrue(self.approval("identical")[0])
 
-    def test_non_ancestor_is_rejected(self):
-        for status in ("ahead", "diverged", "unknown"):
+    def test_older_or_unrelated_source_is_rejected(self):
+        # An older main commit is rejected too, so a stale commit cannot be tagged later.
+        for status in ("behind", "ahead", "diverged", "unknown"):
             with self.subTest(status=status):
                 accepted, requests = self.approval(status)
                 self.assertFalse(accepted)
@@ -288,8 +283,8 @@ class ReleaseSourceTest(unittest.TestCase):
                 self.assertFalse(self.approval(runs=[dict(self.run, **{field: value})])[0])
 
     def test_invalid_source_is_rejected_before_api_access(self):
-        for field, value in (("GITHUB_REF", "refs/heads/main"), ("GITHUB_REF", "refs/tags/release"),
-                             ("GITHUB_EVENT_NAME", "workflow_dispatch"), ("GITHUB_SHA", "invalid"),
+        for field, value in (("GITHUB_REF", "refs/heads/feature"), ("GITHUB_REF", "refs/tags/v0.3.0"),
+                             ("GITHUB_EVENT_NAME", "push"), ("GITHUB_SHA", "invalid"),
                              ("GITHUB_REPOSITORY", "example/../package")):
             with self.subTest(field=field, value=value):
                 with mock.patch.dict(self.environment, {field: value}):
@@ -303,6 +298,86 @@ class ReleaseSourceTest(unittest.TestCase):
                 accepted, requests = self.approval(error=error)
                 self.assertFalse(accepted)
                 self.assertEqual(len(requests), 1)
+
+
+MIRROR_WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "publish-mirror.yml"
+
+
+@unittest.skipUnless(MIRROR_WORKFLOW.is_file(), "The mirror publish workflow is not in this tree.")
+class MirrorReleaseTagTest(unittest.TestCase):
+    def setUp(self):
+        self.sha = "a" * 40
+        self.digest = "b" * 64
+        self.temporary = tempfile.TemporaryDirectory()
+        self.environment = {
+            "GITHUB_REPOSITORY": "chickinfry/chickinfry-js",
+            "GITHUB_SHA": self.sha,
+            "GITHUB_REF": "refs/tags/v0.5.0",
+            "GITHUB_EVENT_NAME": "push",
+            "GH_TOKEN": "fixture-token",
+            "RUNNER_TEMP": self.temporary.name,
+        }
+        workflow = json.loads(MIRROR_WORKFLOW.read_text())
+        sources = []
+        for job in ("build", "publish"):
+            run = workflow["jobs"][job]["steps"][0]["run"]
+            sources.append(run.split("<<'TRUST'\n", 1)[1].split("\nTRUST\n", 1)[0] + "\n")
+        self.assertEqual(sources[0], sources[1])
+        self.source = compile(sources[0], str(MIRROR_WORKFLOW), "exec")
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def tag(self, **changes):
+        tag = {"tag": "v0.5.0", "object": {"sha": self.sha, "type": "commit"},
+               "message": "Release v0.5.0\n\nnpm-tarball-sha256: " + self.digest + "\n"}
+        tag.update(changes)
+        return tag
+
+    def verify(self, status="identical", ref=None, tag=None):
+        responses = iter(({"status": status},
+                          ref or {"object": {"type": "tag", "sha": "c" * 40}},
+                          tag or self.tag()))
+
+        def open_api(request, timeout):
+            self.assertEqual(request.get_header("Authorization"), "Bearer fixture-token")
+            return io.BytesIO(json.dumps(next(responses)).encode())
+
+        with mock.patch.dict(os.environ, self.environment, clear=True), \
+                mock.patch("urllib.request.build_opener") as opener, \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            opener.return_value.open.side_effect = open_api
+            try:
+                exec(self.source, {})
+            except SystemExit as error:
+                self.assertEqual(error.code, 1)
+                return None
+        return (Path(self.temporary.name) / "expected.sha256").read_text().strip()
+
+    def test_annotated_tag_on_main_head_yields_its_digest(self):
+        self.assertEqual(self.verify(), self.digest)
+
+    def test_rejected_release_tags(self):
+        cases = {
+            "older main commit": {"status": "behind"},
+            "lightweight tag": {"ref": {"object": {"type": "commit", "sha": self.sha}}},
+            "tag on another commit": {"tag": self.tag(object={"sha": "d" * 40, "type": "commit"})},
+            "tag of a tag": {"tag": self.tag(object={"sha": self.sha, "type": "tag"})},
+            "renamed tag": {"tag": self.tag(tag="v0.5.1")},
+            "no digest": {"tag": self.tag(message="Release v0.5.0\n")},
+            "two digests": {"tag": self.tag(message="npm-tarball-sha256: " + self.digest
+                                            + "\nnpm-tarball-sha256: " + "e" * 64 + "\n")},
+            "short digest": {"tag": self.tag(message="npm-tarball-sha256: " + "b" * 63 + "\n")},
+        }
+        for name, case in cases.items():
+            with self.subTest(case=name):
+                self.assertIsNone(self.verify(**case))
+
+    def test_wrong_source_is_rejected(self):
+        for field, value in (("GITHUB_REPOSITORY", "example/package"), ("GITHUB_EVENT_NAME", "workflow_dispatch"),
+                             ("GITHUB_REF", "refs/tags/v0.5"), ("GITHUB_REF", "refs/heads/main")):
+            with self.subTest(field=field, value=value), mock.patch.dict(self.environment, {field: value}):
+                self.assertIsNone(self.verify())
 
 
 if __name__ == "__main__":

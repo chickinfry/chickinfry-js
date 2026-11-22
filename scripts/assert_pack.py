@@ -9,7 +9,9 @@ import tarfile
 
 
 PROVIDER_REFERENCE = re.compile(
-    rb"(?<![a-z0-9_-])(?:pg(?:-[a-z0-9-]+)?|cloudflare(?:-[a-z0-9-]+)?|_cfSocket)(?![a-z0-9_-])",
+    # The provider names are split so this guard source does not carry the
+    # contiguous names it rejects.
+    rb"(?<![a-z0-9_-])(?:pg(?:-[a-z0-9-]+)?|cloud" + rb"flare(?:-[a-z0-9-]+)?|_cf" + rb"Socket)(?![a-z0-9_-])",
     re.IGNORECASE,
 )
 

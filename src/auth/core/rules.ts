@@ -9,9 +9,6 @@ export const emailPolicy = Object.freeze({
   codeResendMillis: 60_000,
   invalidCode: "invalid_code",
   resetLifetimeMillis: 3600000,
-  rateWindowMillis: 3600000,
-  addressMaximum: 3,
-  ipMaximum: 30,
   unverifiedCode: "email_not_verified",
   unverifiedStatus: 403,
   invalidTokenCode: "invalid_token",
@@ -24,7 +21,6 @@ export const signupPolicy = Object.freeze({
   checkFailedCode: "signup_check_failed",
   creationRejectedCode: "user_creation_rejected",
   requestLifetimeMillis: 24 * 60 * 60_000,
-  maximumActiveRequests: 3,
 });
 
 export const devicePolicy = Object.freeze({

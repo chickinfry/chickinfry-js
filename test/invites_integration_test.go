@@ -20,6 +20,15 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// The PostgreSQL adapter is internal, so the suites that drive it live beside it.
+func scriptDirectory(script string) string {
+	switch script {
+	case "verify-sessions.js", "verify-invites.js", "verify-postgres.js":
+		return filepath.Join("internal", "database", "test")
+	}
+	return "test"
+}
+
 func TestInvitationsWithPostgreSQL(t *testing.T) {
 	root := os.Getenv("CHIK_JS_RUNTIME_ROOT")
 	if root == "" {
@@ -136,7 +145,7 @@ func TestInvitationsWithPostgreSQL(t *testing.T) {
 				"node",
 				"--test",
 				"--test-reporter=tap",
-				filepath.Join(root, "test", script),
+				filepath.Join(root, scriptDirectory(script), script),
 			)
 			command.Dir = root
 			command.Env = append(os.Environ(),

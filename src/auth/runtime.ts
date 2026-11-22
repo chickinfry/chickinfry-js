@@ -7,6 +7,7 @@ import { AuthError } from "./core/errors.js";
 import { normalizeEmail, validateToken, cleanupCandidates, cleanupPage, emailPolicy, signupPolicy, emailLinkBase, renderAuthMail, type SessionPolicy } from "./core/rules.js";
 import { coreVersion } from "./core/version.js";
 import { resolveSignupRateLimit } from "./signup-rate-limit.js";
+import { resolveAbuseLimits } from "./abuse-limits.js";
 import { withTransactionState } from "./transaction.js";
 import type { Tokens, BrowserSession, IdentityProvider, AuthUser, AuthActor, AuthOptions, SignupRateLimitOptions, SessionTransport, InviteSummary,
   AuthMailer, AuthMail, ActionTokenKind, Accepted, SignupAttempt, SignupHookResult } from "./core/types.js";
@@ -61,8 +62,9 @@ export class Auth {
     }
     const lookupEnv = options.lookupEnv ?? (name => typeof process === "undefined" ? undefined : process.env[name]);
     const signupRateLimit = resolveSignupRateLimit(options.signupRateLimit, lookupEnv);
+    const abuseLimits = resolveAbuseLimits(options.abuseLimits, lookupEnv);
     this.db = createStore(port);
-    this.flows = new Flows(this.db, providers, () => this.now(), options, signupRateLimit);
+    this.flows = new Flows(this.db, providers, () => this.now(), options, signupRateLimit, abuseLimits);
     this.policy = this.flows.policy;
   }
 

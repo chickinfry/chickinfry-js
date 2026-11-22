@@ -3,7 +3,6 @@ import { test } from "node:test";
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { Auth, AuthError } from "../dist/auth/runtime.js";
-import { createPostgresPort } from "../internal/database/dist/postgres.js";
 import { createDatabase } from "../dist/auth/private/database.js";
 
 const failed = work => assert.rejects(work, error => error instanceof AuthError
@@ -110,6 +109,8 @@ test("SQL timeout fails signup even when the hook catches its query error", asyn
 const url = process.env.CHIK_TEST_DATABASE_URL;
 
 test("signup hook deadlines isolate PostgreSQL transactions and reused connections", {skip: !url}, async t => {
+  // The database adapter is internal, so the public mirror never loads it.
+  const {createPostgresPort} = await import("../internal/database/dist/postgres.js");
   const port = createPostgresPort(url), other = createPostgresPort(url);
   const db = createDatabase(port);
   const table = `signup_hook_${randomUUID().replaceAll("-", "")}`;

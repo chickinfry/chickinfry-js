@@ -62,9 +62,19 @@ export interface SignupRateLimitOptions {
   readonly windowSeconds?: number;
 }
 
+export interface AbuseLimitOptions {
+  readonly mailWindowSeconds?: number;
+  readonly mailAddressMax?: number;
+  readonly mailIpMax?: number;
+  readonly pendingSignupMax?: number;
+  readonly defaultMax?: number;
+  readonly defaultWindowSeconds?: number;
+}
+
 export interface AuthOptions {
   readonly signup?: "open" | "invite-only";
   readonly signupRateLimit?: SignupRateLimitOptions;
+  readonly abuseLimits?: AbuseLimitOptions;
   readonly lookupEnv?: (name: string) => string | undefined;
   readonly projectId?: string;
   readonly session?: SessionPolicy;

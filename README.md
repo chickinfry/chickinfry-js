@@ -181,6 +181,21 @@ so the runtime rejects the configuration. Set the count and window to positive i
 digits without padding. Invalid settings fail before database I/O. A full signup
 bucket returns `rate_limited` (429). Existing buckets retain their expiry.
 
+### Abuse limits
+
+Pass `AuthOptions.abuseLimits` to set the remaining limits that protect the authentication
+database. Each option may also be set through its environment variable, which wins over the
+option. Values are positive integers; invalid settings fail before database I/O.
+
+| Option | Environment variable | Limits |
+| --- | --- | --- |
+| `mailWindowSeconds` | `AUTH_RATE_LIMITS_MAIL_WINDOW_SECONDS` | window for the two mail limits below |
+| `mailAddressMax` | `AUTH_RATE_LIMITS_MAIL_ADDRESS_MAX` | verification mails per address in that window |
+| `mailIpMax` | `AUTH_RATE_LIMITS_MAIL_IP_MAX` | verification mails per caller address in that window |
+| `pendingSignupMax` | `AUTH_RATE_LIMITS_PENDING_SIGNUP_MAX` | unfinished signups per email address |
+| `defaultMax` | `AUTH_RATE_LIMITS_DEFAULT_MAX` | sign-in and identity attempts in the default window |
+| `defaultWindowSeconds` | `AUTH_RATE_LIMITS_DEFAULT_WINDOW_SECONDS` | the default window |
+
 ### Email verification and password reset
 
 Email behavior is opt-in at the runtime boundary. With no email options, signup still issues a session immediately, duplicate addresses return `account_exists` (409), and no mail is sent. A generator can enable verification explicitly with `email: {verification: "required"}`; the runtime requires an injected `AuthMailer` and an HTTPS `emailLinkBase` (HTTP loopback is allowed for development). Apply the generated email authentication migration before enabling these options.

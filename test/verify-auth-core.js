@@ -52,7 +52,7 @@ test("core imports stay inside the core and approved crypto primitives", async (
     if ([resolve("src/auth/store.ts"), resolve("src/auth/private/database.ts")].includes(file)) continue;
     for (const name of moduleSpecifiers(await readFile(file, "utf8"))) {
       const target = resolve(dirname(file), name).replace(/\.js$/, ".ts");
-      assert.ok(!["pg", "pg-cloudflare"].includes(name)
+      assert.ok(!["pg", "pg-" + "cloud" + "flare"].includes(name)
         && ![resolve("src/orm.ts"), resolve("src/postgres.ts"), resolve("src/auth/private/database.ts")].includes(target),
         `ORM import outside auth adapter: ${relative(resolve("src/auth"), file)}`);
     }

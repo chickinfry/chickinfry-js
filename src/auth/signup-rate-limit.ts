@@ -30,14 +30,14 @@ function signupSignal(value: unknown, field: string): Required<SignupRateLimitOp
   return value;
 }
 
-function positiveInteger(value: number, maximum: number, field: string): number {
+export function positiveInteger(value: number, maximum: number, field: string): number {
   if (!Number.isInteger(value) || value < 1 || value > maximum) {
     throw new Error(`${field} must be an integer between 1 and ${maximum}.`);
   }
   return value;
 }
 
-function environmentInteger(lookupEnv: (name: string) => string | undefined, name: string, fallback: number, maximum: number): number {
+export function environmentInteger(lookupEnv: (name: string) => string | undefined, name: string, fallback: number, maximum: number): number {
   const raw = lookupEnv(name);
   if (raw === undefined) return fallback;
   const value = Number(raw);
