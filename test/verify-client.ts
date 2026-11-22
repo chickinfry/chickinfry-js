@@ -42,6 +42,12 @@ assert.throws(() => new sdk.HttpTransport("http://example.test"), local("invalid
 for (const timeout of [0,-1,1.1,NaN,Infinity,2_147_483_648,Number.MAX_SAFE_INTEGER+1]) {
   assert.throws(() => new sdk.HttpTransport("https://example.test",undefined,{timeout}), local("invalid_argument",undefined));
 }
+// Only the reserved /api prefix may follow the origin; any other path could send credentials elsewhere.
+for (const address of ["https://example.test/v1", "https://example.test/api/", "https://example.test/apis",
+  "https://example.test/API", "https://example.test/api/v1", "https://example.test/api?x=1", "https://example.test/api#x"]) {
+  assert.throws(() => new sdk.HttpTransport(address), local("invalid_argument", undefined));
+  assert.throws(() => new sdk.BrowserHttpTransport(address), local("invalid_argument", undefined));
+}
 const transport = new sdk.HttpTransport("https://example.test");
 try {
   let calls = 0;
@@ -50,6 +56,14 @@ try {
   await assert.rejects(transport.invoke("catalog.create",{value:1n}), local("invalid_argument",undefined));
   await assert.rejects(transport.invoke("catalog.create",{value:"x".repeat(4<<20)}), local("resource_exhausted",undefined));
   assert.equal(calls,0);
+  const urls: string[] = [];
+  globalThis.fetch = async (input) => { urls.push(String(input)); return Response.json({rows:[]}); };
+  await new sdk.HttpTransport("https://example.test/api").invoke("catalog.list",{});
+  await new sdk.HttpTransport("https://example.test/api").withBearer("a".repeat(43)).invoke("catalog.list",{});
+  await new sdk.BrowserHttpTransport("https://example.test/api").invoke("catalog.list",{});
+  await transport.invoke("catalog.list",{});
+  assert.deepEqual(urls,[...Array(3).fill("https://example.test/api/catalog.list"),"https://example.test/catalog.list"]);
+  globalThis.fetch = async () => { calls++; return Response.json({}); };
   const options = {persist:false as const};
   Reflect.set(options,Symbol.for("chickinfry.store.scope.v1"),{appId:"test-app",projectId:"test-project",origin:"https://example.test",screen:"screen-a"});
   await assert.rejects(new sdk.HttpTransport("https://example.test",options).invoke("catalog.create",{}),local("unauthenticated",undefined));

@@ -28,7 +28,9 @@ console.log(result);
 
 Replace the endpoint and operation with those from your application. Endpoints
 must be HTTPS origins, or HTTP origins with an explicit loopback IP address for
-local development. Authenticated operations use
+local development. An endpoint may end with the reserved `/api` path, such as
+`https://app.example.com/api`, to reach the server through a web app's own
+origin; no other path is accepted. Authenticated operations use
 `transport.withBearer(accessToken).invoke(...)`.
 
 `HttpTransport` implements `Transport`. Its optional timeout is in milliseconds:

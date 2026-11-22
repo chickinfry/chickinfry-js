@@ -56,6 +56,7 @@ export class ClientError extends Error {
 
 export class HttpTransport implements Transport {
   private readonly origin: string;
+  private readonly base: string;
   private sessionStore: SessionStore | undefined;
   private refreshes = new Map<string, Promise<string>>();
   private readonly token: string | undefined;
@@ -73,13 +74,13 @@ export class HttpTransport implements Transport {
     if (token !== undefined && !validToken(token)) throw new ClientError("invalid_argument");
     this.token = token;
     this.timeout = timeoutMilliseconds(timeoutOptions.timeout ?? options.timeout);
-    this.origin = operationOrigin(origin);
+    ({origin: this.origin, base: this.base} = operationAddress(origin));
     this.configuration = createDevice(this.origin, options, false, token);
     this.device = this.configuration.device;
   }
 
   withBearer(token: string): HttpTransport {
-    const copy = new HttpTransport(this.origin, token, {timeout:this.timeout});
+    const copy = new HttpTransport(this.base, token, {timeout:this.timeout});
     copy.sessionStore = undefined;
     return copy;
   }
@@ -87,7 +88,7 @@ export class HttpTransport implements Transport {
   withSession(store: SessionStore): HttpTransport {
     const credentials = attachedCredentials(store);
     if (credentials) assertSession(credentials, credentials);
-    const copy = new HttpTransport(this.origin, {timeout:this.timeout});
+    const copy = new HttpTransport(this.base, {timeout:this.timeout});
     copy.refreshes = sessionRefreshes.get(store) ?? new Map();
     sessionRefreshes.set(store, copy.refreshes);
     copy.sessionStore = store;
@@ -214,7 +215,7 @@ export class HttpTransport implements Transport {
   private async invokeOnce(operation: string, input: Readonly<Record<string, unknown>>, token: string | undefined, received?: (status: number) => void): Promise<unknown> {
     const headers = new Headers({"content-type": "application/json"});
     if (token !== undefined) headers.set("authorization", "Bearer " + token);
-    return invokeHTTP(this.origin, operation, input, headers, "omit", this.timeout, received);
+    return invokeHTTP(this.base, operation, input, headers, "omit", this.timeout, received);
   }
 }
 
@@ -329,13 +330,14 @@ function readCredentials(value: unknown): SessionCredentials {
 /** Cookie-only transport with no token storage, refresh, or operation replay. */
 export class BrowserHttpTransport implements Transport {
   private readonly origin: string;
+  private readonly base: string;
   private device: Device | undefined;
   private configuration: ReturnType<typeof createDevice>;
   constructor(origin: string);
   constructor(origin: string, options?: Omit<TransportOptions, "token">);
   constructor(origin: string, private readonly options: Omit<TransportOptions, "token"> = {}) {
     timeoutMilliseconds(options.timeout);
-    this.origin = operationOrigin(origin);
+    ({origin: this.origin, base: this.base} = operationAddress(origin));
     this.configuration = createDevice(this.origin, options, true, Reflect.get(options, "token"));
     this.device = this.configuration.device;
   }
@@ -354,12 +356,17 @@ export class BrowserHttpTransport implements Transport {
     return this.invokeOnce(operation, input);
   }
   private invokeOnce(operation: string, input: Readonly<Record<string, unknown>>, anonymous = false, received?: (status: number) => void): Promise<unknown> {
-    return invokeHTTP(this.origin, operation, input,
+    return invokeHTTP(this.base, operation, input,
       new Headers({"content-type": "application/json", "x-chik-browser": "1"}), anonymous ? "omit" : "include", this.options.timeout, received);
   }
 }
 
-function operationOrigin(origin: string): string {
+// A web app reaches its server through the same origin under /api. Only this
+// reserved prefix is accepted, so a typo cannot send credentials to another path.
+const operationPrefixes = ["/api"];
+
+/** operationAddress splits a server address into its origin and the base that operation paths are appended to. */
+function operationAddress(origin: string): {origin: string; base: string} {
     // Check the raw host before the URL parser normalizes non-canonical IPv4.
     const host = /^[a-z][a-z\d+.-]*:\/\/(\[[^\]]+\]|[^:/\\?#@]+)(?::\d+)?(?:\/|$)/i.exec(origin)?.[1];
     const octets = host?.split(".");
@@ -369,10 +376,11 @@ function operationOrigin(origin: string): string {
     try { url = new URL(origin); }
     catch { throw new ClientError("invalid_argument"); }
     const secure = url.protocol === "https:" || (url.protocol === "http:" && loopback);
-    if (!secure || url.username || url.password || url.pathname !== "/" || url.search || url.hash) {
+    const prefix = url.pathname === "/" ? "" : operationPrefixes.find(value => value === url.pathname);
+    if (!secure || url.username || url.password || prefix === undefined || url.search || url.hash) {
       throw new ClientError("invalid_argument");
     }
-    return url.origin;
+    return {origin: url.origin, base: url.origin + prefix};
 }
 
 async function invokeHTTP(origin: string, operation: string, input: Readonly<Record<string, unknown>>,
