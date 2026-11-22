@@ -128,7 +128,8 @@ test("two-step email authentication preserves privacy and atomic state on Postgr
   const {invokeAuth, browserRequest} = await import("../dist/auth/router.js");
   const port = createPostgresPort(url), other = createPostgresPort(url);
   t.after(async () => { await port.close(); await other.close(); });
-  const db = createDatabase(port), mail = [], hooks = [];
+  const db = createDatabase(port), mail = [], hooks = [], boundAttempts = [];
+  let failAttempt = false;
   let clock = Date.now();
   const now = () => clock;
   const settings = {email: {verification: "required"}, projectName: "Application", emailLinkBase: "https://app.example.test", mailer: {
@@ -140,6 +141,12 @@ test("two-step email authentication preserves privacy and atomic state on Postgr
       hooks.push("creating");
     },
     async committed() { hooks.push("committed"); },
+    async signupAttempting(tx, attempt) {
+      // The request row is written in this transaction, before the mail is queued.
+      assert.ok(typeof attempt === "string" && attempt.length === 36);
+      if (failAttempt) throw new Error("binding unavailable");
+      boundAttempts.push(attempt);
+    },
   }, settings);
   const fresh = () => randomUUID() + "@example.test";
   const seedMissingResetRequests = async (runtime, callerIp) => {
@@ -684,6 +691,22 @@ test("two-step email authentication preserves privacy and atomic state on Postgr
     release.resolve();
     await locked;
     await result;
+  });
+
+  await t.test("a failing signup hook rolls the request back before any mail is queued", async () => {
+    const address = fresh(), sent = mail.length;
+    failAttempt = true;
+    await rejected(auth.signup(address, password), "user_creation_failed", 500);
+    await tick();
+    assert.equal(mail.length, sent);
+    assert.equal(await pending(address), undefined);
+    failAttempt = false;
+    // The address is not left with an active request: the next signup is bound and its code is mailed.
+    const result = await signup(address);
+    assert.equal(boundAttempts.at(-1), result.attempt);
+    assert.equal((await pending(address)).id, result.attempt);
+    assert.equal((await latest()).email, address);
+    assert.equal(mail.length, sent + 1);
   });
 
   await t.test("required signup shares the ten-attempt identity limit without exposing account existence", async () => {

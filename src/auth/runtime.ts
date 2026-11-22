@@ -19,6 +19,12 @@ export type { SessionPolicy, Tokens, BrowserSession, IdentityProvider, AuthUser,
 export interface UserCreationHooks {
   checkSignup?(input: Readonly<{email: string}>): SignupHookResult | Promise<SignupHookResult>;
   creating?(transaction: DatabasePort, user: AuthUser): Promise<SignupHookResult>;
+  /**
+   * Runs in the transaction that saves an email-verified signup request, before its mail is queued.
+   * The attempt id is the one returned to the client. A thrown error or a rejection rolls the request back.
+   * Addresses that already have an account or three active requests get no request row; the hook still runs for them.
+   */
+  signupAttempting?(transaction: DatabasePort, attempt: string): Promise<SignupHookResult>;
   committed?(user: AuthUser): Promise<void>;
   inviteManaging?(transaction: DatabasePort, actor: AuthActor, projectId: string): Promise<void>;
 }
@@ -102,7 +108,11 @@ export class Auth {
 
   private async signupWithEmail(prepared: Awaited<ReturnType<Flows["prepareSignup"]>>): Promise<SignupAttempt> {
     const attempt = randomUUID();
-    const mail = await this.port.transaction(port => this.flows.commitEmailSignup(createStore(port), {...prepared, attempt}));
+    const mail = await this.port.transaction(async port => {
+      const pending = await this.flows.commitEmailSignup(createStore(port), {...prepared, attempt});
+      await this.signupAttempting(port, attempt);
+      return pending;
+    });
     this.sendMail(mail);
     this.scheduleCleanup();
     return {accepted: true, attempt};
@@ -311,7 +321,16 @@ export class Auth {
 
   private async creating(port: DatabasePort, user: AuthUser): Promise<void> {
     const hook = this.hooks.creating;
-    if (!hook) return;
+    if (hook) await this.leasedHook(port, lease => hook.call(this.hooks, lease, user));
+  }
+
+  private async signupAttempting(port: DatabasePort, attempt: string): Promise<void> {
+    const hook = this.hooks.signupAttempting;
+    if (hook) await this.leasedHook(port, lease => hook.call(this.hooks, lease, attempt));
+  }
+
+  /** Runs a signup hook on a leased handle of the open transaction with the shared time budget. */
+  private async leasedHook(port: DatabasePort, call: (lease: DatabasePort) => Promise<SignupHookResult>): Promise<void> {
     const started = performance.now();
     let active = true, timedOut = false;
     let pending: Promise<unknown> = Promise.resolve();
@@ -360,7 +379,7 @@ export class Auth {
           const [settings] = await port.query("select pg_catalog.current_setting('lock_timeout') as lock_timeout, pg_catalog.current_setting('statement_timeout') as statement_timeout", []);
           await limits();
           remaining();
-          rejection = signupRejection(await hook.call(this.hooks, lease, user));
+          rejection = signupRejection(await call(lease));
           await pending;
           remaining();
           active = false;

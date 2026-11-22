@@ -10,7 +10,7 @@ const failed = work => assert.rejects(work, error => error instanceof AuthError
 const expired = work => assert.rejects(work, {message: "The transaction is no longer active."});
 const user = {email: "private-signup@example.test"};
 
-function fixture(t, creating, query = async () => []) {
+function fixture(t, creating, query = async () => [], attempting) {
   const calls = [], logs = [];
   t.mock.method(console, "error", message => logs.push(JSON.parse(message)));
   const port = {
@@ -22,8 +22,8 @@ function fixture(t, creating, query = async () => []) {
     },
     transaction() { throw new Error("Unexpected transaction."); },
   };
-  const auth = new Auth(port, [], Date.now, {creating});
-  return {run: () => auth.creating(port, user), calls, logs};
+  const auth = new Auth(port, [], Date.now, {creating, signupAttempting: attempting});
+  return {run: () => auth.creating(port, user), attempt: id => auth.signupAttempting(port, id), calls, logs};
 }
 
 test("signup hook deadline invalidates queued and retained statements", async t => {
@@ -216,4 +216,28 @@ test("signup hook deadlines isolate PostgreSQL transactions and reused connectio
       assert.equal((await normal.session(result.accessToken)).id, result.userId);
     }
   });
+});
+
+test("signup attempt hook runs on the transaction lease with the signup hook budget", async t => {
+  const id = "00000000-0000-4000-8000-000000000001";
+  let lease, received;
+  const {attempt, calls} = fixture(t, undefined, async () => [], async (tx, value) => {
+    lease = tx;
+    received = value;
+    await tx.query("attempt write", []);
+  });
+  await attempt(id);
+  assert.equal(received, id);
+  assert.ok(calls.some(call => call.sql === "attempt write"));
+  await expired(lease.query("late", []));
+  assert.equal(calls.some(call => call.sql === "late"), false);
+});
+
+test("signup attempt hook failures and rejections stop the request", async t => {
+  const id = "00000000-0000-4000-8000-000000000002";
+  await failed(fixture(t, undefined, undefined, async () => { throw new Error("storage unavailable"); }).attempt(id));
+  await assert.rejects(fixture(t, undefined, undefined, async () => ({reject: "Signup is not available."})).attempt(id),
+    error => error instanceof AuthError && error.status === 422);
+  // Without a hook nothing runs.
+  await fixture(t, undefined, undefined, undefined).attempt(id);
 });
