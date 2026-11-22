@@ -693,20 +693,23 @@ test("two-step email authentication preserves privacy and atomic state on Postgr
     await result;
   });
 
-  await t.test("a failing signup hook rolls the request back before any mail is queued", async () => {
+  await t.test("failed signup hooks leave the request and its mail budget available for recovery", async () => {
     const address = fresh(), sent = mail.length;
-    failAttempt = true;
-    await rejected(auth.signup(address, password), "user_creation_failed", 500);
+    try {
+      failAttempt = true;
+      for (let i = 0; i < 4; i++) await rejected(auth.signup(address, password), "user_creation_failed", 500);
+    } finally {
+      failAttempt = false;
+    }
     await tick();
     assert.equal(mail.length, sent);
     assert.equal(await pending(address), undefined);
-    failAttempt = false;
-    // The address is not left with an active request: the next signup is bound and its code is mailed.
     const result = await signup(address);
     assert.equal(boundAttempts.at(-1), result.attempt);
     assert.equal((await pending(address)).id, result.attempt);
+    await tick();
+    assert.equal(mail.length, sent + 1, "the first signup after recovery must send its code immediately");
     assert.equal((await latest()).email, address);
-    assert.equal(mail.length, sent + 1);
   });
 
   await t.test("required signup shares the ten-attempt identity limit without exposing account existence", async () => {

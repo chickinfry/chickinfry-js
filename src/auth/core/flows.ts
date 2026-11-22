@@ -29,15 +29,14 @@ export class Flows {
     }
   }
 
-  async prepareSignup(email: string, password: string, inviteCode: string, callerIp?: string) {
+  async prepareSignup(email: string, password: string, inviteCode: string) {
     email = normalizeEmail(email);
     validatePassword(password);
     if (typeof inviteCode !== "string") throw new AuthError("invalid_input", 400);
     await this.rateLimitSignup(email);
     const invite = this.options.signup === "invite-only" ? await this.checkInvite(this.db, email, inviteCode) : undefined;
     const passwordHash = await hashPassword(password);
-    const mailAllowed = this.options.email?.verification === "required" && await this.allowMail(email, callerIp);
-    return {email, passwordHash, mailAllowed, inviteId: invite?.id ?? null};
+    return {email, passwordHash, inviteId: invite?.id ?? null};
   }
 
   async commitSignup(tx: Store, input: {email: string; passwordHash: string}, inviteCode: string,
@@ -79,7 +78,7 @@ export class Flows {
   async commitEmailSignup(tx: Store, input: Awaited<ReturnType<Flows["prepareSignup"]>> & {attempt: string}) {
     await this.lockSignupEmail(tx, input.email);
     if (await tx.userByEmail(input.email)) {
-      return input.mailAllowed ? {kind: "account_exists" as const, to: input.email, token: ""} : undefined;
+      return {kind: "account_exists" as const, to: input.email, token: ""};
     }
     const previous = await tx.signupsByEmail(input.email);
     const active = [];
@@ -93,7 +92,7 @@ export class Flows {
       codeExpiresAt: actionTokenExpiry("email_verification", this.now()), inviteId: input.inviteId,
       expiresAt: new Date(this.now() + signupPolicy.requestLifetimeMillis).toISOString(),
       attempts: 0, createdAt: at, updatedAt: at});
-    return input.mailAllowed ? {kind: "email_verification" as const, to: input.email, token, signup: true} : undefined;
+    return {kind: "email_verification" as const, to: input.email, token, signup: true};
   }
 
   private async lockSignupEmail(tx: Store, email: string) {
@@ -229,12 +228,12 @@ export class Flows {
     return code;
   }
 
-  private async allowMail(email: string, callerIp?: string): Promise<boolean> {
+  async allowMail(email: string, callerIp?: string, db = this.db): Promise<boolean> {
     const keys = mailRateKeys(email, callerIp);
     const {mailIpMax, mailAddressMax, mailWindowSeconds} = this.abuseLimits;
     try {
-      if (keys.ip) await this.rateLimit("auth_mail_ip", keys.ip, mailIpMax, mailWindowSeconds * 1_000);
-      await this.rateLimit("auth_mail_address", keys.address, mailAddressMax, mailWindowSeconds * 1_000);
+      if (keys.ip) await this.rateLimit("auth_mail_ip", keys.ip, mailIpMax, mailWindowSeconds * 1_000, db);
+      await this.rateLimit("auth_mail_address", keys.address, mailAddressMax, mailWindowSeconds * 1_000, db);
       return true;
     } catch (error) {
       if (error instanceof AuthError && error.code === "rate_limited") return false;
@@ -591,18 +590,17 @@ export class Flows {
   }
 
   private async rateLimit(action: string, value: string, maximum = this.abuseLimits.defaultMax,
-    windowMillis = this.abuseLimits.defaultWindowSeconds * 1_000): Promise<void> {
+    windowMillis = this.abuseLimits.defaultWindowSeconds * 1_000, db = this.db): Promise<void> {
     const key = {action, keyHash: hashToken(value)};
     for (let attempt = 0; attempt < 4; attempt++) {
-      const row = await this.db.rateLimit(key);
+      const row = await db.rateLimit(key);
       const expiresAt = new Date(this.now() + windowMillis).toISOString();
       if (!row) {
-        try { await this.db.createRateLimit({...key, attemptCount: 1, expiresAt}); return; }
-        catch (error) { if (!uniqueViolation(error)) throw error; }
+        if (await db.tryCreateRateLimit({...key, attemptCount: 1, expiresAt})) return;
         continue;
       }
       const next = nextRateLimit(row, expiresAt, maximum, this.now());
-      const updated = await this.db.updateRateLimit(row, next, maximum);
+      const updated = await db.updateRateLimit(row, next, maximum);
       if (updated) return;
     }
     throw new AuthError("rate_limited", 429);
@@ -615,10 +613,6 @@ function publicUser(user: AppAuthUsersRow): AuthUser {
 
 function invalidActionToken(): AuthError {
   return new AuthError(emailPolicy.invalidTokenCode, emailPolicy.invalidTokenStatus);
-}
-
-function uniqueViolation(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "code" in error && error.code === "23505";
 }
 
 function inviteSummary(row: AppAuthInvitesRow, now: number): InviteSummary {

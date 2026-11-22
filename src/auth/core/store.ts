@@ -148,7 +148,7 @@ export interface Store {
   expiredInvites(cutoff: string, limit: number): Promise<AppAuthInvitesRow[]>;
   deleteInvite(id: string): Promise<void>;
   rateLimit(key: RateKey): Promise<AppAuthRateLimitsRow | null | undefined>;
-  createRateLimit(values: AppAuthRateLimitsRow): Promise<AppAuthRateLimitsRow>;
+  tryCreateRateLimit(values: AppAuthRateLimitsRow): Promise<boolean>;
   updateRateLimit(row: AppAuthRateLimitsRow, values: RateState, maximum: number): Promise<AppAuthRateLimitsRow | undefined>;
   expiredRateLimits(cutoff: string, limit: number): Promise<AppAuthRateLimitsRow[]>;
   lockRateLimit(row: AppAuthRateLimitsRow, cutoff: string): Promise<AppAuthRateLimitsRow | undefined>;

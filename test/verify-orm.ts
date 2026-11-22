@@ -1,6 +1,7 @@
 import {strict as assert} from "node:assert";
 import {Repository, defineTable, encodeValue, or} from "../src/orm.js";
 import type {DatabasePort, Filter} from "../src/orm.js";
+import {insertIfAbsent} from "../src/orm-internal.js";
 
 interface Row {id:string; quantity:number; note:string|null}
 const table=defineTable<Row>({name:"items",primaryKey:["id"],updateColumns:["quantity","note"],columns:{id:"id",quantity:"quantity",note:{databaseName:"note",encode:value=>encodeValue("string",true,value)}}});
@@ -17,7 +18,12 @@ const notFound=(error:unknown)=>error instanceof Error && "code" in error && err
 await assert.rejects(repo.update({id:"missing"},{note:"new"}),notFound);
 await assert.rejects(repo.increment({id:"missing"},{quantity:1}),notFound);
 assert.equal(await repo.updateIf({id:"missing"},table.columns.quantity.eq(1),{quantity:2}),undefined);
+const item = {id:"one",quantity:2,note:null};
+assert.equal(await insertIfAbsent(repo, item), false);
+assert.match(sql, /^insert into "public"\."items" .* on conflict \("id"\) do nothing returning /);
+assert.deepEqual(parameters, ["one", 2, null]);
 rows=[{id:"one",quantity:2,note:null}];
+assert.equal(await insertIfAbsent(repo, item), true);
 assert.deepEqual(await repo.findById({id:"one"}),{id:"one",quantity:2,note:null});
 assert.deepEqual(await repo.delete({id:"one"}),{id:"one",quantity:2,note:null});
 assert.match(sql,/^delete from "public"\."items" where "id" = \$1 returning /);

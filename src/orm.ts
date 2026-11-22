@@ -1,3 +1,5 @@
+import { registerInsertIfAbsent } from "./orm-internal.js";
+
 export interface DatabasePort {
   query(sql: string, parameters: readonly unknown[]): Promise<readonly Record<string, unknown>[]>;
   transaction<T>(work: (tx: DatabasePort) => Promise<T>): Promise<T>;
@@ -266,6 +268,10 @@ export class Repository<
   Update extends object = Partial<Row>,
   PrimaryKey extends object = Partial<Row>,
 > {
+  static {
+    registerInsertIfAbsent(async (repository, row) => (await repository.insertRow(row, "ignore")).length !== 0);
+  }
+
   constructor(
     private readonly database: DatabasePort,
     readonly table: TableDefinition<Row>,
@@ -306,14 +312,14 @@ export class Repository<
   }
 
   async insert(row: Insert): Promise<Row> {
-    return this.insertRow(row,false);
+    return this.requireRow(await this.insertRow(row), "insert");
   }
 
   async upsert(row: Insert & PrimaryKey): Promise<Row> {
-    return this.insertRow(row,true);
+    return this.requireRow(await this.insertRow(row, "update"), "insert");
   }
 
-  private async insertRow(row: Insert, upsert: boolean): Promise<Row> {
+  private async insertRow(row: Insert, conflict?: "update" | "ignore"): Promise<readonly Record<string, unknown>[]> {
     const record = inputRecord(row, "insert");
     assertKnownInputColumns(record, this.table.insertColumns, "insert");
     for (const column of this.table.requiredInsertColumns) {
@@ -325,22 +331,27 @@ export class Repository<
     let sql = keys.length === 0
       ? `insert into ${quoteIdentifier(this.table.name, "table")} default values`
       : `insert into ${quoteIdentifier(this.table.name, "table")} (${keys.map((key) => quoteIdentifier(this.table.columns[key].databaseName, "column")).join(", ")}) values (${keys.map((key, index) => `$${index + 1}`).join(", ")})`;
-    if (upsert) {
+    if (conflict) {
       for (const key of this.table.primaryKey) {
         if (!keys.includes(key)) throw new Error("Upsert requires every primary key value.");
       }
-      const mutable = keys.filter(key => !this.table.primaryKey.includes(key));
-      if (mutable.length === 0) throw new Error("Upsert requires mutable values.");
       const primary = this.table.primaryKey.map(key => quoteIdentifier(this.table.columns[key].databaseName,"column"));
-      const assignments = mutable.map(key => {
-        const column = quoteIdentifier(this.table.columns[key].databaseName,"column");
-        return `${column} = excluded.${column}`;
-      });
-      sql += ` on conflict (${primary.join(", ")}) do update set ${assignments.join(", ")}`;
+      sql += ` on conflict (${primary.join(", ")}) do `;
+      if (conflict === "ignore") {
+        sql += "nothing";
+      } else {
+        const mutable = keys.filter(key => !this.table.primaryKey.includes(key));
+        if (mutable.length === 0) throw new Error("Upsert requires mutable values.");
+        const assignments = mutable.map(key => {
+          const column = quoteIdentifier(this.table.columns[key].databaseName,"column");
+          return `${column} = excluded.${column}`;
+        });
+        sql += `update set ${assignments.join(", ")}`;
+      }
     }
     sql += ` returning ${this.selectList()}`;
     const parameters = keys.map((key) => this.table.columns[key].encodeDatabaseValue(record[key]));
-    return this.requireRow(await this.database.query(sql, parameters), "insert");
+    return this.database.query(sql, parameters);
   }
 
   async update(key: PrimaryKey, patch: Update): Promise<Row> {

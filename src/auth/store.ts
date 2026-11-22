@@ -1,6 +1,7 @@
 import { cleanupBudgetMillis } from "../database-budget.js";
-import { and, or, createDatabase, appAuthSessionsTable, type Database, type DatabasePort } from "./private/database.js";
+import { and, or, createDatabase, appAuthSessionsTable, type DatabasePort } from "./private/database.js";
 import { encodeTimestampValue } from "../orm.js";
+import { insertIfAbsent } from "../orm-internal.js";
 import { cleanupCandidates as candidates, emailPolicy, type CleanupCondition } from "./core/rules.js";
 import type { Store } from "./core/store.js";
 
@@ -27,10 +28,7 @@ export interface RuntimeStore extends Store {
 }
 
 export function createStore(port: DatabasePort): RuntimeStore {
-  return databaseStore(createDatabase(port));
-}
-
-function databaseStore(db: Database): RuntimeStore {
+  const db = createDatabase(port);
   return {
     signup: id => db.appAuthSignupRequests.findById({id}),
     signupsByEmail: email => db.appAuthSignupRequests.findMany({where: c => c.email.eq(email)}),
@@ -56,7 +54,7 @@ function databaseStore(db: Database): RuntimeStore {
         c => c.expiresAt.lte(cutoff), {updatedAt: row.updatedAt});
       if (locked) await db.appAuthSignupRequests.delete({id: row.id});
     },
-    transaction: work => db.transaction(tx => work(databaseStore(tx))),
+    transaction: work => port.transaction(tx => work(createStore(tx))),
     user: id => db.appAuthUsers.findById({id}),
     userByEmail: async email => (await db.appAuthUsers.findMany({where: c => c.email.eq(email), limit: 1}))[0],
     createUser: (email, passwordHash) => db.appAuthUsers.insert({email, passwordHash}),
@@ -142,7 +140,8 @@ function databaseStore(db: Database): RuntimeStore {
       orderBy: c => [c.expiresAt.asc(), c.id.asc()], limit}),
     deleteInvite: async id => { await db.appAuthInvites.delete({id}); },
     rateLimit: key => db.appAuthRateLimits.findById(key),
-    createRateLimit: values => db.appAuthRateLimits.insert(values),
+    // A concurrent first charge must not abort the transaction that owns the signup request.
+    tryCreateRateLimit: values => insertIfAbsent(db.appAuthRateLimits, values),
     updateRateLimit: (row, values, maximum) => values.expiresAt === row.expiresAt
       ? db.appAuthRateLimits.incrementIf({action: row.action, keyHash: row.keyHash},
         c => and(c.expiresAt.eq(row.expiresAt), c.attemptCount.lt(maximum)), {attemptCount: 1}, {expiresAt: row.expiresAt})

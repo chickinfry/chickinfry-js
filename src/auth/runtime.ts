@@ -82,9 +82,9 @@ export class Auth {
       email = normalizeEmail(email);
       await this.checkSignup(email);
     }
-    const prepared = await this.flows.prepareSignup(email, password, inviteCode, callerIp);
+    const prepared = await this.flows.prepareSignup(email, password, inviteCode);
     if (this.options.email?.verification === "required") {
-      const result = await this.signupWithEmail(prepared);
+      const result = await this.signupWithEmail(prepared, callerIp);
       await this.acceptedAfter(started);
       return result;
     }
@@ -106,12 +106,13 @@ export class Auth {
     return tokens;
   }
 
-  private async signupWithEmail(prepared: Awaited<ReturnType<Flows["prepareSignup"]>>): Promise<SignupAttempt> {
+  private async signupWithEmail(prepared: Awaited<ReturnType<Flows["prepareSignup"]>>, callerIp?: string): Promise<SignupAttempt> {
     const attempt = randomUUID();
     const mail = await this.port.transaction(async port => {
-      const pending = await this.flows.commitEmailSignup(createStore(port), {...prepared, attempt});
+      const tx = createStore(port);
+      const pending = await this.flows.commitEmailSignup(tx, {...prepared, attempt});
       await this.signupAttempting(port, attempt);
-      return pending;
+      return await this.flows.allowMail(prepared.email, callerIp, tx) ? pending : undefined;
     });
     this.sendMail(mail);
     this.scheduleCleanup();
