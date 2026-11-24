@@ -1,4 +1,4 @@
-import { registerInsertIfAbsent } from "./orm-internal.js";
+import { insertIfAbsentKey } from "./orm-internal.js";
 
 export interface DatabasePort {
   query(sql: string, parameters: readonly unknown[]): Promise<readonly Record<string, unknown>[]>;
@@ -268,10 +268,6 @@ export class Repository<
   Update extends object = Partial<Row>,
   PrimaryKey extends object = Partial<Row>,
 > {
-  static {
-    registerInsertIfAbsent(async (repository, row) => (await repository.insertRow(row, "ignore")).length !== 0);
-  }
-
   constructor(
     private readonly database: DatabasePort,
     readonly table: TableDefinition<Row>,
@@ -317,6 +313,11 @@ export class Repository<
 
   async upsert(row: Insert & PrimaryKey): Promise<Row> {
     return this.requireRow(await this.insertRow(row, "update"), "insert");
+  }
+
+  /** @internal */
+  async [insertIfAbsentKey](row: Insert & PrimaryKey): Promise<boolean> {
+    return (await this.insertRow(row, "ignore")).length !== 0;
   }
 
   private async insertRow(row: Insert, conflict?: "update" | "ignore"): Promise<readonly Record<string, unknown>[]> {

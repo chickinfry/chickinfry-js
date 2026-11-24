@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+import { build } from "esbuild";
 
 const original = globalThis.console;
 const originalLog = console.log;
@@ -36,6 +39,25 @@ function reference(message, values, databaseURL) {
   }
   return output;
 }
+
+test("injecting log redaction preserves the runtime error constructor", async () => {
+  const {outputFiles: [bundle]} = await build({
+    stdin: {
+      contents: `import {OperationError} from "@chickinfry/chickinfry";
+        const error = new OperationError("realtime_unavailable", 503);
+        if (error.code !== "realtime_unavailable" || error.status !== 503) throw new Error("Invalid operation error");`,
+      resolveDir: fileURLToPath(new URL("..", import.meta.url)),
+    },
+    bundle: true,
+    platform: "neutral",
+    format: "esm",
+    target: "es2022",
+    external: ["node:*"],
+    inject: [fileURLToPath(new URL("../dist/logging.js", import.meta.url))],
+    write: false,
+  });
+  execFileSync(process.execPath, ["--input-type=module"], {input: bundle.text});
+});
 
 test("exact corpus, crossing matches, case-sensitive literals and percent escapes agree with the host oracle", () => {
   const values = ["private", "private-long", "a.*$[x]\n가", "redacted", "z", "xy", "abc", "four", "가", "가a", "ABCD", "BCDEFG", "literal%2F", ""];

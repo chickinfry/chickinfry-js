@@ -6,6 +6,7 @@
     "target": "ES2022",
     "verbatimModuleSyntax": true,
     "declaration": true,
+    "stripInternal": true,
     "rootDir": "src",
     "outDir": "dist",
     "types": [

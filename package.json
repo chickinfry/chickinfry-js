@@ -7,6 +7,7 @@
     "url": "git+https://github.com/chickinfry/chickinfry-js.git"
   },
   "type": "module",
+  "sideEffects": ["./dist/index.js", "./dist/logging.js"],
   "description": "Shared TypeScript runtime for Chickinfry generated clients and servers.",
   "files": [
     "dist",
